@@ -1,0 +1,26 @@
+# 依赖 / 环境
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 密钥 —— 绝不进 git
+.env
+*.local
+
+# 输出产物(报告可选择性提交,先全忽略)
+output/
+*.tmp
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 运行时账本 / 记忆链数据（合规红线：记忆数据一个字节不进 git）
+data/memory/
+data/memory/**
+
+# 自检/验收脚本生成的报告产物（非源码,随跑随变）
+session/selfcheck_report.txt
+output/**
