@@ -21,9 +21,39 @@ from typing import Callable, Optional
 
 from ..relation.affinity import LedgerEvent
 
-# 与 memory_architecture §三 一致
+# 与 memory_architecture §三 一致(规格以 token 计)
 MAX_TOKENS = 500
 DISTILL_EVERY_N_TURNS = 10
+
+# ---- 计量单位钉死(2026-09-08 · 校准尾1) ----
+# 规格把 L2 产物顶在 ≤500 TOKEN。enforce 侧只有字符可数,不能拿『字符』当『token』
+# 硬混(中文字符≈0.6~0.7 token;454 中文字≈300 出头 token,曾经的安全是巧合不是保证)。
+# 钉法:enforce 一律用『字符数』,并取【绝对安全上界 CHAR_BUDGET = MAX_TOKENS 字符】。
+#   理由:对任一真实 CJK tokenizer,1 个字符至多耗 1 个 token(CJK≈0.6~0.7, ASCII≪1),
+#   故 ≤500 字符 ⇒ 必然 ≤500 token —— 永远满足规格,宁严不松。
+#   代价:比 DeepSeek 实测容量(500 token≈740+ 中文字)留了保守余量;若嫌挤,后续可换
+#   tokenizer 真数(如 tiktoken cl100k 近似 CJK)把容量放回 —— 届时只需改 CHAR_BUDGET 与
+#   一段文档,不动规格数字。规格数字(MAX_TOKENS=500)恒为唯一权威,enforce 侧是它的
+#   安全代理,不是第二个计量标准。
+# 派生量:故事层主诉与【他是谁】副产的 token 预算分工(500≈400/100)在 prompt 侧表达;
+#   enforce 只对『总和 500 字符』这一代理做机械封顶,不替 prompt 管内部配比。
+
+# L2 画像的蒸馏状态（引擎级日志用结构化标记；不进芽衣可见注入文本）：
+#   ok                  = 真实 LLM 蒸馏成功（且未超预算截断）
+#   memory_not_distilled = LLM 调用失败/异常/空输出 → 规则回退（L1 镜像），未真实蒸馏
+#   budget_truncated     = LLM 蒸馏成功但初稿超预算 → 定向压缩/句边界截断后落盘
+# 注：这两个降级标记是系统看的结构化状态，禁止泄漏进 _memory_context 注入区。
+STATUS_OK = "ok"
+STATUS_NOT_DISTILLED = "memory_not_distilled"
+STATUS_BUDGET_TRUNCATED = "budget_truncated"
+
+# 输出两段分隔行(distill_l2.md 与其对齐)
+WHO_SPLIT = "---WHO---"
+# enforce 用字符上界(绝对安全代理):见文件头『计量单位钉死』—— 1 字符≤1 token,
+# 故 CHAR_BUDGET=MAX_TOKENS 字符 ⇒ 必然 ≤MAX_TOKENS token,满足规格。
+# (原 MAX_TOKENS*2 把 1 字算成 0.5 token,是单位混用的隐患,已废弃。)
+CHAR_BUDGET = MAX_TOKENS
+
 
 _CACHE_SUBDIR = "l2_profiles"
 
@@ -36,13 +66,21 @@ class L2Profile:
     data: dict = field(default_factory=dict)
     updated_utc: float = 0.0
     rebuilt_from_l1: bool = False   # 标记:本内容是重建产物(容灾可证)
-    events_seen: int = 0            # 蒸馏时账本里有多少事件(供新鲜度判定)
+    events_seen: int = 0            # 本缓存内容覆盖到账本里几条(注入层/规则重建用它算新鲜)
+    distilled_events_seen: int = 0  # 引擎真实 LLM 蒸馏吃到的账本条数(蒸馏游标;规则重建不写它)
+    distill_status: str = STATUS_OK  # ok / memory_not_distilled / budget_truncated(系统看,不进注入)
+    budget_truncated: bool = False   # 兼容别名:本内容曾被句边界截断(历史/外部读数用)
 
     def to_markdown(self) -> str:
-        """注入 prompt 用的文本(仅描述性,绝无指令性)。"""
+        """注入 prompt 用的文本(仅描述性,绝无指令性)。
+
+        只输出可注入的描述性字串字段; distill_status / events_seen 等结构化
+        状态完全不进这里 —— 防模型把「memory_not_distilled」当剧情素材演。
+        """
         lines = []
         for k, v in self.data.items():
             if isinstance(v, str) and v:
+                # 独立字段一律并排注入;「他是谁」也是纯描述性事实,可注入为参照注
                 lines.append(f"- {k}: {v}")
         return "\n".join(lines) if lines else ""
 
@@ -66,9 +104,37 @@ def save_l2(profile: L2Profile) -> None:
         "updated_utc": profile.updated_utc,
         "rebuilt_from_l1": profile.rebuilt_from_l1,
         "events_seen": profile.events_seen,
+        "distilled_events_seen": profile.distilled_events_seen,
+        "distill_status": profile.distill_status,
     }
     with open(_cache_path(profile.user_id), "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def save_distilled(user_id: str, data: dict, events_seen: int,
+                   status: str = STATUS_OK,
+                   rebuilt: bool = False) -> L2Profile:
+    """引擎级专用落盘口：写一份真实蒸馏/降级标记过的 L2 画像缓存。
+
+    data      : {我们的故事, 他是谁}（distill 输出切开后的两段）。
+    events_seen: 本次真实蒸馏吃到的账本事件数 —— 同时写进蒸馏游标
+                （distilled_events_seen）；规则重建不写它，故引擎能据此只吃新增。
+    status    : ok / memory_not_distilled / budget_truncated(见模块常量)。
+    rebuilt   : 本次产物是否重建(容灾)；真实蒸馏为 False。
+    """
+    prof = L2Profile(
+        user_id=user_id,
+        data=data,
+        updated_utc=datetime.now(timezone.utc).timestamp(),
+        rebuilt_from_l1=rebuilt,
+        events_seen=events_seen,
+        distilled_events_seen=events_seen,
+        distill_status=status,
+        budget_truncated=(status == STATUS_BUDGET_TRUNCATED),
+    )
+    save_l2(prof)
+    return prof
+
 
 
 def load_l2(user_id: str) -> Optional[L2Profile]:
@@ -83,6 +149,9 @@ def load_l2(user_id: str) -> Optional[L2Profile]:
         updated_utc=payload.get("updated_utc", 0.0),
         rebuilt_from_l1=payload.get("rebuilt_from_l1", False),
         events_seen=payload.get("events_seen", 0),
+        distilled_events_seen=payload.get("distilled_events_seen", 0),
+        distill_status=payload.get("distill_status", STATUS_OK),
+        budget_truncated=payload.get("budget_truncated", False),
     )
 
 
@@ -93,6 +162,41 @@ def delete_l2(user_id: str) -> bool:
         os.remove(path)
         return True
     return False
+
+
+def _split_who(text: str) -> dict:
+    """把 distill_l2.md 规定的两段输出切开成 {我们的故事, 他是谁}。
+
+    - story: 主诉叙事层（>=400 token 预算大头）。
+    - who  : 【他是谁·参照注】独立字段（<=100 token）；无分隔行则 story 即全文。
+    运行时不对『谁在哪个字段』做臆测推断——只按分隔行切；缺块就当空。
+    """
+    story, who = "", ""
+    if WHO_SPLIT in text:
+        head, _, tail = text.partition(WHO_SPLIT)
+        story = head.strip()
+        # tail 里去掉可能残留的【他是谁·参照注】标题行
+        who = tail.strip()
+        if who.startswith("【他是谁"):
+            _, _, w2 = who.partition("】")
+            who = w2.strip()
+    else:
+        story = text.strip()
+    return {"我们的故事": story, "他是谁": who}
+
+
+def truncate_to_budget(s: str, max_chars: int = CHAR_BUDGET) -> str:
+    """句边界机械截断（最后兜底；用于压缩仍超预算时）。只在句号/换行处切，不劈词。"""
+    s = s.strip()
+    if len(s) <= max_chars:
+        return s
+    cut = s[:max_chars]
+    # 回退到最近的句末标点，避免截断半句
+    for sep in ("。", "！", "？", "\n", ".", "!"):
+        i = cut.rfind(sep)
+        if i > 0 and i < max_chars - 4:
+            return cut[: i + 1]
+    return cut
 
 
 # ---- 确定性规则回退(无 LLM 也能重建最简画像,兼可测试) ----
@@ -121,8 +225,10 @@ def _rule_fallback(events: list[LedgerEvent], user_id: str) -> dict:
     return d
 
 
-def _enforce_budget(d: dict, max_len_chars: int = MAX_TOKENS * 2) -> dict:
-    """粗略把 data 压缩进 token 预算(中文约 1 token ≈ 0.6~1 字,这里给个字符上界)。"""
+def _enforce_budget(d: dict, max_len_chars: int = CHAR_BUDGET) -> dict:
+    """把 data 压缩进字符上界 CHAR_BUDGET(即 500 字符的绝对安全 token 代理)。
+    逐键扣减;超预算键截到剩量,余额用完即停。
+    """
     out: dict = {}
     budget = max_len_chars
     for k, v in d.items():
@@ -175,9 +281,9 @@ def rebuild_l2_from_ledger(user_id: str,
     data = distill(events, user_id, distill_fn=distill_fn)
     prof = L2Profile(
         user_id=user_id, data=data,
-        updated_utc=datetime.now(timezone.utc).timestamp(),
         rebuilt_from_l1=True,
         events_seen=len(events),
+        distill_status=STATUS_NOT_DISTILLED if distill_fn is None else STATUS_OK,
     )
     save_l2(prof)
     return prof

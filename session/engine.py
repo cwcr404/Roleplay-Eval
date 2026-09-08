@@ -95,6 +95,7 @@ class SessionEngine:
         llm_chat: Optional[Callable] = None,
         llm_stream: Optional[Callable] = None,
         kb: Optional[dict] = None,
+        distill_prompt: Optional[str] = None,
     ):
         self.user_id = user_id
         self.model = model
@@ -111,6 +112,17 @@ class SessionEngine:
         self._last_modality: Optional[str] = None  # 上轮路由结果("闲聊"/"攻略";观测/验收读)
         self._history: list[tuple[str, str]] = []
         self._lock = threading.Lock()
+        # ---- L2 蒸馏触发状态(会话级;非账本状态) ----
+        self._total_turns = 0  # 实测对话轮数(跨 history 裁剪单调递增;常规蒸馏 cadence 用它)
+        # 蒸馏是引擎职责。这些计数/信号是『会话态』,不是账本态 —— 不落 L1、不影响
+        # time-travel。它们驱动『此刻要不要蒸』的运行时判定,错了只影响蒸馏时机,
+        # 防抖/常规每10轮/强制超预算都会补兜,绝不污染任何持久事实源。
+        self.distill_prompt: Optional[str] = distill_prompt  # L2 蒸馏 instruction(如 None 则蒸馏关闭)
+        self._last_regular_distill_turn: Optional[int] = None  # 最近一次常规蒸馏的总轮号
+        self._last_any_distill_turn: Optional[int] = None      # 最近一次任意蒸馏的总轮号(防抖基准)
+        self._pending_distill_signals: list[str] = []          # 书记员上报的特例信号({type}s),非账本镜像
+        # 蒸馏日志(供观测/验收):每次 _maybe_distill 定案追加一条
+        self.distill_log: list[dict] = []
 
     # ---- LLM 出口(默认走 utils.api;可被测试替换) ----
     @staticmethod
@@ -238,11 +250,16 @@ class SessionEngine:
         with self._lock:
             self._history.append((user_msg, reply))
             self._history = self._history[-self.history_turns:]
+            self._total_turns += 1  # 单调总轮数(常规蒸馏 cadence 基准;不受 history 裁剪影响)
 
         # --- 2. 书记员抽取(独立、冷面;不阻塞上面回复) ---
         ev = None
         if not force_no_event and self.extractor_prompt:
             ev = self._maybe_extract(user_msg, reply)
+
+        # --- 2.5 L2 蒸馏巡检(三触发 + 防抖 + 攒批;特例信号已由书记员收集进池) ---
+        # 蒸馏关闭(distill_prompt=None,默认)则整块无操作 —— 不烧多余的 LLM。
+        self._maybe_distill()
 
         sig = self._sig()
         return TurnResult(
@@ -369,10 +386,20 @@ class SessionEngine:
             obj = _json.loads(raw.strip())
             if not obj.get("has_event"):
                 return None
+            typ = obj.get("type")
             ev = self.memory.record_event(
-                obj.get("type"), obj.get("content", ""), obj.get("weight_delta", 0),
+                typ, obj.get("content", ""), obj.get("weight_delta", 0),
                 ts=self.clock(),  # 走注入时钟,replay 才能看到衰减
             )
+            # ---- 特例信号收集(卡点1(a)派生论) ----
+            # 剧情级子判定由书记员产出时顺带报(is_plot_critical),随 content 一起到引擎。
+            # 只当信号、只驱动蒸馏时机(缓存类决策),绝不驱动账本写入/weight_delta。
+            if ev is not None and self.distill_prompt:
+                plot = bool(obj.get("is_plot_critical", False))
+                if typ == "共同经历" and plot:
+                    self._push_signal(f"剧情级共同经历@{obj.get('content','')[:14]}")
+                elif typ in ("情绪显著时刻", "承诺与约定", "承诺兑现", "承诺违约"):
+                    self._push_signal(f"{typ}@{obj.get('content','')[:14]}")
             return ev
         except Exception:
             return None
@@ -391,7 +418,201 @@ class SessionEngine:
                         if prom else "(无已入账承诺)")
         )
 
-    # ---- 状态出口 ----
+    # ----------------------------------------------------------------------
+    # L2 蒸馏巡检 —— 三触发 + 防抖 + 双计数 + 降级,(卡点2攒批输入)见下
+    # 触发规格(docs/memory_architecture §三 + L2 蒸馏规格 2026-09-08):
+    #   · 常规 = 每 10 轮实测对话触发一次
+    #   · 强制 = 现有 L2 画像超 500 token 上限 -> 即时压缩
+    #   · 特例 = ②剧情级共同经历/③情绪显著/④承诺约定 事件入账即触发
+    #   · 防抖 = 两次蒸馏间隔 >= N 轮(特例风暴时合并到轮末批量,不必每事件都蒸)
+    #   · 攒批 = 每次吃的输入是『events_seen 之后全部新增事件』,非仅触发那几条
+    # 本方法在 turn() 末尾调用:self.distill_prompt 为 None(未开蒸馏)则整块无操作。
+    #     ----------------------------------------------------------------------
+    _DEBOUNCE_N = 3  # 特例/批量蒸馏最小间隔(实测起步 3)
+    # 特例触发类型:共同经历剧情级(content 里带剧情/选择信号),情绪显著,承诺兑现/违约/约定
+    _SPECIAL_TYPES = frozenset({"共同经历", "情绪显著时刻", "承诺与约定",
+                                "承诺兑现", "承诺违约"})
+
+    def _push_signal(self, tag: str):
+        """把一条特例触发信号塞进会话级待蒸馏池(去重)。只加信号,不碰账本。
+
+        卡点1(a)派生论铁律:池子是『会话态』不是『账本态』。里面的信号只驱动
+        蒸馏时机(缓存类决策)—— 触发错了顶多多蒸一次/少蒸一轮,防抖与 10 轮
+        常规与超预算强制都会兜底;绝不用它驱动任何账本写入/weight_delta。
+        """
+        if tag not in self._pending_distill_signals:
+            self._pending_distill_signals.append(tag)
+
+    def _existing_l2_blocks(self) -> dict:
+        """当前 L2 画像两段(供蒸馏输入 + 超预算判断);无缓存则空。"""
+        try:
+            from kb.memory.distill import load_l2
+            prof = load_l2(self.user_id)
+        except Exception:
+            prof = None
+        if prof is None or not prof.data:
+            return {"我们的故事": "", "他是谁": ""}
+        return {"我们的故事": prof.data.get("我们的故事", ""),
+                "他是谁": prof.data.get("他是谁", "")}
+
+    def _l2_over_budget(self) -> bool:
+        """现有 L2 画像是否超预算(强制触发)。统一读 CHAR_BUDGET(500 token 的字符安全代理)。"""
+        try:
+            from kb.memory.distill import load_l2, CHAR_BUDGET
+            prof = load_l2(self.user_id)
+        except Exception:
+            return False
+        if prof is None:
+            return False
+        # 单一权威口径:三段(故事/他是谁…)字符总和 > CHAR_BUDGET 即视为超预算强制重蒸。
+        # (计量单位钉死:CHAR_BUDGET=500 字符 ⇒ 必然 ≤500 token,故不再逐字段另设 MAX_TOKENS*2 宽松线。)
+        total = sum(len(str(v)) for v in prof.data.values() if isinstance(v, str))
+        return total > CHAR_BUDGET
+
+    def _prev_events_seen(self) -> int:
+        """蒸馏游标：上次『真实 LLM 蒸馏』吃到的账本事件数(只认 distilled_events_seen)。
+
+        注意不是 events_seen —— 后者被注入层的规则重建(service.l2 自动重刷)也写,
+        若混用会把『规则回退重建过』误当成『已真实蒸过』,导致常规触发吃不到新增。
+        规则重建不写 distilled_events_seen(它默认 0),故未真蒸过则从 0 全量抢回。
+        """
+        try:
+            from kb.memory.distill import load_l2
+            prof = load_l2(self.user_id)
+        except Exception:
+            prof = None
+        return getattr(prof, "distilled_events_seen", 0) or 0
+
+    def _distill_input_prompt(self, new_events) -> str:
+        """按 distill_l2.md 输入块装:新增事件 + 现有旧画像(L2 合并重写用)。"""
+        blocks = []
+        if new_events:
+            lines = "\n".join(
+                f"- [{ev.type}] {ev.content} (权重 {ev.weight_delta:g})"
+                for ev in reversed(new_events)
+            )
+            blocks.append(f"【自上次蒸馏以来新增的 L1 事件】(共 {len(new_events)} 条):\n{lines}")
+        old = self._existing_l2_blocks()
+        if old.get("我们的故事") or old.get("他是谁"):
+            parts = [f"【我们的故事】\n{old['我们的故事']}" if old["我们的故事"] else ""]
+            parts += [f"【他是谁】\n{old['他是谁']}" if old["他是谁"] else ""]
+            blocks.append("【现有 L2 旧画像(要重写合并,不是追加)】:\n" + "\n".join(x for x in parts if x))
+        return "\n\n".join(blocks)
+
+    def _maybe_distill(self) -> Optional[dict]:
+        """三触发 + 防抖 + 降级的 L2 蒸馏之主。蒸馏关闭(distill_prompt=None)则 None。
+
+        返回本次蒸馏定案日志 dict(供观测/验收);本次未触发返回 None。
+        动不到它,蒸馏就不发生 —— 违规产物一律回退并标降级,不冒充完整蒸馏。
+        """
+        if not self.distill_prompt:
+            return None
+        t = self._total_turns
+
+        # --- 触发判定(三模,互不排他,一次批量处理) ---
+        from kb.memory.distill import (
+            CHAR_BUDGET, STATUS_OK, STATUS_NOT_DISTILLED,
+            STATUS_BUDGET_TRUNCATED, truncate_to_budget, _split_who,
+            save_distilled, DISTILL_EVERY_N_TURNS,
+        )
+        regular = ((t - (self._last_regular_distill_turn or 0)) >= DISTILL_EVERY_N_TURNS)
+        forced = self._l2_over_budget()
+        special = bool(self._pending_distill_signals)
+
+        # --- 防抖:特例连续命中时,距上次任意蒸馏不足 N 轮则本轮跳过(等下次/攒批) ---
+        debounced_special = False
+        if special and self._last_any_distill_turn is not None \
+                and (t - self._last_any_distill_turn) < self._DEBOUNCE_N:
+            debounced_special = True  # 特例先攒着,信号不丢,下轮再验
+
+        if not (regular or forced or (special and not debounced_special)):
+            return None
+
+        reason = []
+        if regular:
+            reason.append("常规(每10轮)")
+        if forced:
+            reason.append("强制(超预算)")
+        if special and not debounced_special:
+            reason.append(f"特例({len(self._pending_distill_signals)})")
+
+        # --- 攒批输入(卡点2):events_seen 游标后全部新增事件 ---
+        prev_seen = self._prev_events_seen()
+        chain = getattr(self.memory, "ledger", None)
+        new_events = list(chain.events[prev_seen:]) if chain is not None else []
+        now_seen = len(chain.events) if chain is not None else prev_seen
+
+        # 无新增但被触发(强制压缩历史超预算)—— 仍允许,喂旧画像去压缩
+        user_prompt = self._distill_input_prompt(new_events)
+        log = {"trigger": ";".join(reason) or "强制",
+               "turn": t, "debounced_special": debounced_special,
+               "new_events": len(new_events), "events_seen": now_seen}
+
+        status = STATUS_OK
+        dirty = False
+        result_story = result_who = ""
+        if new_events or forced:
+            # ---- 真实 LLM 蒸馏一次 ----------------
+            try:
+                raw = self._llm_chat(self.distill_prompt, user_prompt or "请蒸馏新增事件。",
+                                     model=self.model, temperature=0.0)
+            except Exception as e:
+                # 降级①:LLM 调用失败/异常/空输出 -> 不重试,落规则回退并标记未蒸馏
+                log["path"] = "memory_not_distilled"
+                log["error"] = str(e)[:80]
+                status = STATUS_NOT_DISTILLED
+            else:
+                if not (raw and raw.strip()):
+                    log["path"] = "memory_not_distilled"
+                    log["error"] = "empty llm output"
+                    status = STATUS_NOT_DISTILLED
+                else:
+                    parts = _split_who(raw)
+                    total_len = len(parts["我们的故事"]) + len(parts["他是谁"])
+                    if total_len > CHAR_BUDGET:
+                        # 降级②:蒸馏成功但超预算 -> 先定向压缩一次(把超预算产物原样喂回,
+                        # 只指令『压到 500 内、里程碑不丢』),仍超则句边界机械截断。
+                        try:
+                            c = self._llm_chat(self.distill_prompt, raw,
+                                               model=self.model, temperature=0.0)
+                        except Exception:
+                            c = None
+                        if c and c.strip():
+                            cp = _split_who(c)
+                            result_story = cp["我们的故事"]
+                            result_who = cp["他是谁"]
+                        else:
+                            result_story = truncate_to_budget(raw, CHAR_BUDGET)
+                            result_who = ""
+                        status = STATUS_BUDGET_TRUNCATED
+                    else:
+                        result_story = parts["我们的故事"]
+                        result_who = parts["他是谁"]
+            # 真实蒸馏产物(可能带 budget_truncated)落盘
+            if status == STATUS_OK or status == STATUS_BUDGET_TRUNCATED:
+                try:
+                    save_distilled(self.user_id,
+                                   {"我们的故事": result_story, "他是谁": result_who},
+                                   events_seen=now_seen, status=status)
+                    dirty = True
+                except Exception as e:
+                    log.setdefault("path", "save_error")
+                    log["error"] = str(e)[:80]
+
+        # 降级①(memory_not_distilled):不写任何相像物冒充 L2 —— 仅本处清信号/记状态。
+        if status == STATUS_NOT_DISTILLED:
+            log["path"] = "memory_not_distilled"
+
+        # ---- 记计数/清信号(会话态,提交上调度) ----
+        if regular:
+            self._last_regular_distill_turn = t
+        if dirty or status == STATUS_NOT_DISTILLED:
+            self._last_any_distill_turn = t
+        self._pending_distill_signals.clear()
+        log["status"] = status
+        self.distill_log.append(log)
+        return log
+
     def state(self) -> dict:
         sig = self._sig()
         return {
@@ -423,12 +644,17 @@ def build_session_engine(
     llm_chat: Optional[Callable] = None,
     llm_stream: Optional[Callable] = None,
     kb: Optional[dict] = None,
+    enable_distill: bool = False,
+    distill_prompt_path: str = "prompts/distill_l2.md",
 ) -> SessionEngine:
     """一键装配:读角色卡+书记员 prompt+现场装载该用户的记忆链。
 
     kb: 产品线预查素材库 {guide,lore}(build_kb() 产物)。默认 None = 不预查
         (记忆/评测/回放保持零 KB 行为,避免拉低其它验收);想开预查由产品线
         web/chat 显式传 kb。
+    enable_distill: 默认 False=蒸馏关闭(每 10 轮/超预算/特例三触发不动作)。
+        需要真实 L2 LLM 蒸馏的产品线(replay/web/chat)显式开 True —— 这样
+        自检/评测/纯记忆链路不被多余的蒸馏 LLM 调用污染。
     """
     import os
     base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -445,4 +671,5 @@ def build_session_engine(
         llm_chat=llm_chat,
         llm_stream=llm_stream,
         kb=kb,
+        distill_prompt=(_read(distill_prompt_path) if enable_distill else None),
     )

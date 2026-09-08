@@ -90,11 +90,22 @@ class UserMemory:
         新鲜度策略:规则回退重建零 LLM 成本,故只要发现缓存落后于账本就现场重刷;
         真正调 LLM 的深度蒸馏仍按 cadence(每 N 轮/显式 rebuild_l2)控制 —— 这里
         的自动重刷总是用确定性规则回退,保证 demo 里故事层立刻跟上新事件、又不烧钱。
+
+        【守护真画像(0908 校准捉到的污染)】规则回退重建只在 无缓存 / 或现有缓存本就是
+        规则重建产物 时才现场执行。若现有缓存是【真实 LLM 蒸馏产物】(distilled_events_seen>0,
+        status ok/budget_truncated),即使它因新事件而显“过期”,读路径也**绝不**用确定性规则
+        文本去覆盖它 —— 宁让它旧一拍(注入看到晚一点的画像),等引擎 cadence(常规每10轮/
+        强制/特例)的真实深度蒸馏去追平。原因:规则重建是伪 L2(退化的类型拼接,非叙事),
+        一旦盖掉真实 LLM 画像是污染事实源;这与‘降级不得冒充真实产物’同源 —— 方向相反但同一
+        条底线:真实产物不能被确定性回退顶掉。
         """
         prof = load_l2(self.user_id)
         if prof is not None and self._l2_fresh(prof):
             return prof
-        # 缺缓存或已过期:用规则回退(暂无 LLM)重建
+        # 缓存过期:读路径不造假 —— 真蒸馏缓存保底不动
+        if prof is not None and prof.distilled_events_seen > 0:
+            return prof
+        # 缺缓存 / 现有缓存本就是规则重建(非真蒸馏):现场确定性重刷(容灾/demo 出口)
         return rebuild_l2_from_ledger(self.user_id, self.ledger.events, distill_fn=distill_fn)
 
     def _l2_fresh(self, prof: L2Profile) -> bool:
