@@ -118,6 +118,21 @@ def _run() -> int:
     eng5.turn("早"); eng5.quality_tick("早", "闲聊", "[闲聊]\n好。")
     chk("仪表:全 pass 注入率 0", eng5.qc_injection_rate() == 0.0)
 
+    # ---- 6. 尾巴一:judge 死亡可观测性 —— 失败升计数、面板记降级,不能静默假 pass ----
+    def boom(prompt, player_msg, mode, reply, facts="", model="deepseek-chat"):
+        raise RuntimeError("API key 错")
+    eng6 = SessionEngine(
+        user_id="u_qc_dead", character_prompt="你是雷电芽衣。", extractor_prompt=None,
+        llm_chat=lambda s, u, **kw: "[闲聊]\n好。",
+        quality_prompt="判词", quality_judge=boom)
+    eng6.turn("hi")
+    eng6.quality_tick("hi", "闲聊", "[闲聊]\n好。")
+    chk("死亡:judge 抛错→qc_judge_errors=1", eng6.qc_judge_errors == 1)
+    chk("死亡:面板有降级标记(pass+离线note,不假装已判)",
+        eng6.quality_panel and eng6.quality_panel[-1]["note"] == "质检离线/本次未判")
+    chk("死亡:降级也落 pending(壳仍可安全为空的 pass 态)",
+        eng6._qc_pending_shell == "")  # pass → 不注入,无脏壳泄漏
+
     print(f"quality_wiring_probe: {ok} 断言全过")
     return 0
 

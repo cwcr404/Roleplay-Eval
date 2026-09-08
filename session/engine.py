@@ -121,6 +121,7 @@ class SessionEngine:
         self._qc_polish_run = 0           # 连续修正计数(pass 清零)
         self._qc_turns_total = 0          # 质检生效轮数(仪表分母)
         self._qc_turns_shelled = 0        # 实际注入了壳的轮数(仪表分子)
+        self._qc_judge_errors = 0         # judge 死亡计数器(尾巴一:非零即报警)
         self.quality_panel: list[dict] = []  # 判决落面板/日志(观测/验收读;防异步=没跑)
         self._qc_lock = threading.Lock()
         self._history: list[tuple[str, str]] = []
@@ -433,6 +434,11 @@ class SessionEngine:
             v = judge(self.quality_prompt, user_msg, mode, reply, facts, model=model)
         except Exception:
             # judge 失败 → 降级 pass+note,不 pretend 已认真判
+            # —— 但失败不能是静默假 pass:API key/prompt 路径错时全都会走这里,
+            #    仪表上跟『一切正常』不可区分(异步打盹加强版)。记死计数器,
+            #    冒烟/面板看一眼非零即报警,别让质检系统成下一个『睡了没人知』。
+            with self._qc_lock:
+                self._qc_judge_errors += 1
             from session.async_quality import Verdict
             v = Verdict(verdict="pass", category="none", register="none",
                         reason="", note="质检离线/本次未判", ok=False)
@@ -446,6 +452,12 @@ class SessionEngine:
         if not self._qc_turns_total:
             return 0.0
         return self._qc_turns_shelled / self._qc_turns_total
+
+    @property
+    def qc_judge_errors(self) -> int:
+        """judge 死亡计数器:非零即意味着质检系统在静默降级(配置错/API key 错/路径错),
+        冒烟/面板/运维看一眼即报警。0 = 质检切实跑起来了(不是只降级没报过错)。"""
+        return self._qc_judge_errors
 
 
     def _maybe_extract(self, user_msg: str, reply: str):
