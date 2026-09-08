@@ -44,15 +44,13 @@ LORE_TOP_K = 2
 
 # 前置装配段(产品线内嵌路由,拼装顺序见 _system_for_turn —— 人格卡最前→此段→记忆外挂):
 # 让芽衣在回复首行自报 [闲聊]/[攻略],engine 据此分叉并剥离(标记绝不见于玩家可见流)。
-# 人格内核文本不在此 —— 只约束输出形状,不改『芽衣是谁』。
+# 路由器只做路由,不做导演 —— 演法归人格块,单一事实源归位(09-08 首府改五定稿措辞)。
 _ROUTING_ASSEMBLY = (
     "【本轮输出格式指令·装配层】\n"
     "请在回复的【第一行】用方括号声明本条类型:[闲聊] 或 [攻略]。\n"
-    "- [闲聊]:像平常一样自然回应、延续谈兴,把自己放在当下的相处里。\n"
-    "- [攻略]:对方在问打法/养成/配置等实际怎么玩 —— 用【此刻相关素材】里的事实,以你\n"
-    "  自己的口吻讲成能照做的建议(克制与温度都要有),别照本宣科念条;素材没提的就别硬造。\n"
-    "第一行声明完标记后,从第二行起才是你能被对方看到的话。这条类型声明只是让系统知道\n"
-    "你走了哪条路,不要把它讲给对方听。"
+    "- [攻略]=玩家需要游戏打法/配置类干货的回答。\n"
+    "- [闲聊]=其余一切对话。\n"
+    "第一行声明完标记后,从第二行起才是你能被对方看到的话。怎么说话,按你本来的样子来。"
 )
 # 距离描述作为关系信号的最低可信度(低于此不回读,保持克制)
 # (数值本身只用于读距离描述,不进推理 —— 见 _closeness_text)
@@ -96,6 +94,10 @@ class SessionEngine:
         llm_stream: Optional[Callable] = None,
         kb: Optional[dict] = None,
         distill_prompt: Optional[str] = None,
+        # ---- 产品线 Agent3 异步质检(默认关;评测/回放/selfcheck 不配则不触发) ----
+        quality_prompt: Optional[str] = None,   # agent3_async_verdict.md 全文;None=关质检
+        quality_judge: Optional[Callable] = None,  # 可注入 judge(...)->Verdict;None=用 async_quality.judge_once
+        quality_auto: bool = False,              # True=每轮回复后自动异步跑质检
     ):
         self.user_id = user_id
         self.model = model
@@ -110,6 +112,17 @@ class SessionEngine:
         self._kb = kb  # 知识库检索器 {guide,lore};None=惰性 build_kb(离线/不配则不查)
         self._kb_log: list[str] = []  # 每轮 KB 闸门观测日志(攻略无素材入栈,冒烟观测)
         self._last_modality: Optional[str] = None  # 上轮路由结果("闲聊"/"攻略";观测/验收读)
+        # ---- 产品线 Agent3 异步质检状态(会话级;quality_prompt=None 时整块不动) ----
+        self.quality_prompt: Optional[str] = quality_prompt
+        self.quality_judge: Optional[Callable] = quality_judge
+        self.quality_auto: bool = quality_auto
+        self._qc_pending_verdict = None   # 上一轮质检判决(供下一轮壳取);线程写、加锁读
+        self._qc_pending_shell = ""        # 上一轮折好的固定壳文本(空=不注入)
+        self._qc_polish_run = 0           # 连续修正计数(pass 清零)
+        self._qc_turns_total = 0          # 质检生效轮数(仪表分母)
+        self._qc_turns_shelled = 0        # 实际注入了壳的轮数(仪表分子)
+        self.quality_panel: list[dict] = []  # 判决落面板/日志(观测/验收读;防异步=没跑)
+        self._qc_lock = threading.Lock()
         self._history: list[tuple[str, str]] = []
         self._lock = threading.Lock()
         # ---- L2 蒸馏触发状态(会话级;非账本状态) ----
@@ -363,11 +376,78 @@ class SessionEngine:
         if kb_block:
             # 素材放在 player 原话之后、紧贴生成输入,避免被长历史稀释
             parts.append("【此刻相关素材】\n" + kb_block)
+        # 质检壳(产品线 • Agent3 结果进【用户侧输入流】作附注,不进 system/人格块):
+        # 由调用方在上一轮回复后 quality_tick 折好;仅当质检开启且有可用壳才拼。
+        with self._qc_lock:
+            qc_shell = self._qc_pending_shell if self.quality_prompt else ""
+            self._qc_pending_shell = ""  # 一次性:本轮消费后清空,防旧壳泄漏给下下轮
+        if qc_shell:
+            parts.append("【附】" + qc_shell)
         return "\n\n".join(parts)
 
-    # ------------------------------------------------------------------
-    # 书记员(异步抽取入账)—— 详见 prompts/extractor_event.md + B 验证
-    # ------------------------------------------------------------------
+    # -------------------------------------------------------------------
+    # Agent3 异步质检(产品线;编排 doc §三)
+    # 纪律:质检绝不阻塞主回复生成/绝不重生成玩家已见回复;判决落面板 + 折成
+    # 下一轮固定壳。默认 quality_prompt=None=质检关,评测/回放/selfcheck 零影响。
+    # 异步现实:turn() 永不内联跑 judge —— 由调用方(web 循环/demo)在回复已
+    # 返回玩家后调 quality_tick(可自行挂线程/队列),或 quality_auto=True 时
+    # turn() 用守护线程调度。目的:judge 不在『主回复返回路径』同步等待。
+    # -------------------------------------------------------------------
+    @staticmethod
+    def _default_judge(prompt, player_msg, mode, reply, facts, model):
+        from session.async_quality import judge_once
+        return judge_once(prompt, player_msg, mode, reply, facts, model=model)
+
+    def _qc_store(self, v) -> None:
+        """落面板 + 存 pending(下一轮壳取),线程安全。"""
+        from session.async_quality import inject_fragment
+        with self._qc_lock:
+            self.quality_panel.append({
+                "verdict": getattr(v, "verdict", "pass"),
+                "category": getattr(v, "category", "none"),
+                "register": getattr(v, "register", "none"),
+                "reason": getattr(v, "reason", ""),
+                "note": getattr(v, "note", ""),
+            })
+            shell, advance = inject_fragment(v, self._qc_polish_run)
+            self._qc_pending_shell = shell  # 空=不注入(pass/达闸/被剥光),但仍推进计数如下
+            if advance:
+                if getattr(v, "verdict", "pass") == "pass":
+                    self._qc_polish_run = 0  # 频次闸:pass 清零
+                else:
+                    self._qc_polish_run += 1
+
+    def quality_tick(self, user_msg: str, mode: str, reply: str,
+                     facts: str = "", model: str = "deepseek-chat") -> Optional[dict]:
+        """对『已返回玩家的本轮回复』跑一次质检(回复已定格,judge 绝不改写它)。
+
+        调用方在回复流式推给玩家后、下一轮输入前调(可挂线程)。返回判决 dict,
+        已入 self.quality_panel + 折好 self._qc_pending_shell 供下一轮壳。
+        quality_prompt=None(质检关)时返回 None,不产生任何副作用。
+        """
+        if not self.quality_prompt:
+            return None
+        self._qc_turns_total += 1
+        judge = self.quality_judge or self._default_judge
+        try:
+            v = judge(self.quality_prompt, user_msg, mode, reply, facts, model=model)
+        except Exception:
+            # judge 失败 → 降级 pass+note,不 pretend 已认真判
+            from session.async_quality import Verdict
+            v = Verdict(verdict="pass", category="none", register="none",
+                        reason="", note="质检离线/本次未判", ok=False)
+        self._qc_store(v)
+        if self._qc_pending_shell:
+            self._qc_turns_shelled += 1
+        return self.quality_panel[-1]
+
+    def qc_injection_rate(self) -> float:
+        """质检壳注入率(带壳轮数/质检生效轮数)。Judge 偏松设计下常态应 <0.2。"""
+        if not self._qc_turns_total:
+            return 0.0
+        return self._qc_turns_shelled / self._qc_turns_total
+
+
     def _maybe_extract(self, user_msg: str, reply: str):
         """对本轮跑一次书记员;有事件则经 memory 钳制入账 L1(append-only)。
 

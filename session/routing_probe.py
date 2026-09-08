@@ -88,6 +88,21 @@ def _run() -> int:
     chk("攻略标记仍被剥", "[攻略]" not in r3.reply)
     chk("无KB场景不记no_kb_hit(素材空≠攻略缺素材)", not any("no_kb_hit" in x for x in eng3._kb_log))
 
+    # ---- 路径4(改二):标记宽容 —— 全角括号/内部空白变体都能解析+剥离 ----
+    from session.routing import modality_from_first_line, strip_marker
+    def parse(line):
+        return modality_from_first_line(line)
+    def stripn(line):
+        return strip_marker(line)
+    chk("fw半角", parse("[闲聊]正文") == CHAT_MODALITY)
+    chk("fw全角括号", parse("［攻略 ］正文") == GUIDE_MODALITY)
+    chk("fw全角标记后无空白", parse("［闲聊］正文") == CHAT_MODALITY)
+    chk("fw方括号内部带全角空格", parse("[闲聊 ]正文") == CHAT_MODALITY)
+    chk("fw首行行首空白容忍", parse("   [攻略] 正文") == GUIDE_MODALITY)
+    chk("fw剥全角标记留正文", stripn("［攻略 ］ 正文") == "正文")
+    chk("fw剥半角标记留正文", stripn("[闲聊]正文") == "正文")
+    chk("fw无标记不误剥", parse("随便聊聊") is None)
+
     print(f"routing_probe: {ok} 断言全过")
     return 0
 

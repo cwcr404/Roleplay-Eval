@@ -19,8 +19,12 @@ CHAT_MODALITY = "闲聊"
 GUIDE_MODALITY = "攻略"
 _VALID = frozenset({CHAT_MODALITY, GUIDE_MODALITY})
 
-# 首行标记形如： [闲聊] / [攻略]  —— 允许行首可选空白，后面可紧跟正文
-_MARKER_RE = re.compile(r"^\s*\[(闲聊|攻略)\]\s*(.*)$", re.S)
+# 首行标记形如： [闲聊] / [攻略] / ［闲聊］ / ［攻略 ］(改二:容忍全角括号+内部空白)
+#   —— 半角括号、全角括号都认;空格/全角空格在标签内与括号前后可容忍。
+_MARKER_OPEN = r"[\[［]"      # [ 或 ［
+_MARKER_CLOSE = r"[\]］]"     # ] 或 ］
+_MARKER_WS = r"[ \t\u3000]*"      # 半角/全角空格容忍
+_MARKER_RE = re.compile(rf"^\s*{_MARKER_OPEN}{_MARKER_WS}(闲聊|攻略){_MARKER_WS}{_MARKER_CLOSE}{_MARKER_WS}(.*)$", re.S)
 
 
 def modality_from_first_line(first_line: str) -> Optional[str]:
