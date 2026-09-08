@@ -109,3 +109,66 @@ def fake_stream_chat(system: str, user: str, *,
     while i < len(body):
         yield body[i:i + n]
         i += n
+
+
+def stream_chat(system: str, user: str, *,
+                model: str = MODEL,
+                temperature: float = 0.8,
+                max_retries: int = 1,
+                **kw) -> Iterator[str]:
+    """真 DeepSeek SSE 流式出口(产品线主回复·同步生成器,逐块 yield 文本)。
+
+    与同步 chat() 共用 .env 的 key/base;评测线/记忆锚不碰 —— 只有显式配了
+    llm_stream 的引擎才走这里。块语义:SSE 每个 data 帧的 delta.content 是一块;
+    [DONE] 后停。失败:头部建连/认证错 → 向上抛(调用方决定回退同步 chat());
+    中途断流 → 把已收的文本照常 yield 完再抛,让局部回复不丢(宁半个不丢整句)。
+    """
+    if not API_KEY:
+        raise DeepSeekError("未找到 DEEPSEEK_API_KEY(请检查 roleplay-eval/.env)")
+
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "temperature": temperature,
+        "stream": True,
+    }
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        API_URL,
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {API_KEY}",
+        },
+    )
+
+    # 流式不自动重试:连建/认证错抛一次让调用方回退;中途断流不重试(半条已 yield,
+    # 重试错接更糟)。调用方(engine._main_reply)本就 catch 后回退同步 chat() 兜底。
+    try:
+        with urllib.request.urlopen(req, timeout=180) as resp:
+            buf = b""
+            for raw in resp:
+                buf += raw
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    s = line.decode("utf-8", "replace").strip()
+                    if not s or not s.startswith("data:"):
+                        continue  # 空行/注释/事件行 -> 跳过
+                    tok = s[len("data:"):].strip()
+                    if tok == "[DONE]":
+                        return
+                    try:
+                        obj = json.loads(tok)
+                    except ValueError:
+                        continue
+                    try:
+                        delta = (obj["choices"][0]["delta"].get("content") or "")
+                    except (KeyError, IndexError, TypeError):
+                        delta = ""
+                    if delta:
+                        yield delta
+    except Exception as e:  # noqa: BLE001
+        raise DeepSeekError(f"DeepSeek 流式中断: {e}")
