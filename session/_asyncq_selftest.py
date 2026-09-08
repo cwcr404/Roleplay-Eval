@@ -11,7 +11,7 @@
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from session.async_quality import (parse_verdict, inject_fragment, to_decision,
-                                   Verdict, SHELL_PREFIX, POLISH_GATE_N)
+                                   sanitize_reason, Verdict, SHELL_PREFIX, POLISH_GATE_N)
 
 checks = []
 def ok(name, cond):
@@ -47,8 +47,20 @@ txt, cnt = inject_fragment(Verdict(verdict="blocked", reason="承认AI。"), POL
 ok("gate:未达闸边界→注入", txt != "" and cnt is True)
 
 # 4 reason 纯描述壳
-txt, _ = inject_fragment(Verdict(verdict="polish", reason="某句像接线员。"), 0)
-ok("shell:只拼描述+锚", txt == SHELL_PREFIX + "某句像接线员。")
+_anchor = "某句像接线员。"
+txt, _ = inject_fragment(Verdict(verdict="polish", reason=_anchor), 0)
+ok("shell:只拼描述+锚", txt == SHELL_PREFIX + _anchor)
+
+# 4b reason 机械防线(09-08 裁决 3a → 12→13 补一条):污染 reason 处置
+_polluted = Verdict(verdict="blocked",
+                     reason="开头像接线员;请你改成更有人味的说法,下次务必别用'本助手'。")
+_clean, _hit = sanitize_reason(_polluted.reason)
+txt2, cnt2 = inject_fragment(_polluted, 0)
+ok("san:污染reason→指令句剥离+sanitized打标+壳内零指令词",
+   _hit is True
+   and "你改成" not in _clean and "下次务必" not in _clean and "接线员" in _clean
+   and all(w not in txt2 for w in ("请", "务必", "改成"))
+   and _polluted.sanitized is True)
 
 # 5 决策表
 ok("decision:blocked/hard→拦", to_decision(Verdict(verdict="blocked", category="客服腔", register="hard")).startswith("拦(客服腔/hard)"))

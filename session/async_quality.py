@@ -25,6 +25,19 @@ from typing import Callable, Optional
 SHELL_PREFIX = "上一轮质检意见："
 # 连续修正频次闸(洞3b):同向连续修正 ≤N 轮,超闸不再注入只记日志,防渐进式讨好质检。
 POLISH_GATE_N = 3
+# reason 机械防线(09-08 首府裁决 3a):注入前正则黑名单,指令式句子一律剥离,
+# 只留描述部分。黑名单词是「指令动词/祈使句特征」,与纯描述(事实/感受/诊断)相区。
+_COMMAND_HINTS = (
+    "请改", "请你修改", "请把", "请这样", "下次务必", "记得要", "你应该",
+    "你应当", "你应该改", "需要改成", "需改成", "改成", "改为", "你最好",
+    "拜托你", "希望你能写", "能不能写", "把这句话写", "重写", "改写", "请删除",
+    "请加", "补上", "你要多用", "你要少用", "试着", "尽量做到", "务必保持",
+)
+import re as _re
+_RE_CMDHINT = _re.compile("|".join(_re.escape(w) for w in _COMMAND_HINTS))
+# 句子切分:中文句读(。！？!?;)为界(避免把整段误当一个句子)。
+_RE_SENT = _re.compile(r"(?<=[。！？!?；;])\s*")
+
 
 VERDICTS = ("pass", "polish", "blocked")
 CATEGORIES = ("客服腔", "OOC", "有用性", "none")
@@ -39,6 +52,7 @@ class Verdict:
     anchor: str = ""             # 引用证据句(原样摘录)
     reason: str = ""             # 纯描述(禁指令)
     note: str = ""               # 正向肯定
+    sanitized: bool = False       # reason 是否被机械防线剥过(09-08 3a) → 可记 reason_sanitized:true
     ok: bool = False             # 解析成功?
 
     @property
@@ -109,6 +123,19 @@ def judge_once(
     return parse_verdict(raw)
 
 
+def sanitize_reason(text: str) -> tuple[str, bool]:
+    """reason 机械防线(09-08 裁决 3a):剔除含指令黑名单词的句子,返回 (干净文本, 是否剥过)。"""
+    if not text:
+        return "", False
+    sents = [s.strip() for s in _RE_SENT.split(text) if s and s.strip()]
+    if not sents:
+        # 无句读分隔 → 整段当一句判
+        return ("" if _RE_CMDHINT.search(text) else text), bool(_RE_CMDHINT.search(text))
+    kept = [s for s in sents if not _RE_CMDHINT.search(s)]
+    hit = len(kept) < len(sents)
+    return "".join(kept), hit
+
+
 def inject_fragment(prev: Optional[Verdict], consecutive_polish: int):
     """把上一轮判决折成『能进下周 agent2 prompt 的注入文本』。
 
@@ -123,7 +150,17 @@ def inject_fragment(prev: Optional[Verdict], consecutive_polish: int):
     if consecutive_polish >= POLISH_GATE_N:
         # 超出频次闸:不再注入,防渐进式讨好;只留痕迹(返回空,计一次用于计数推进)
         return "", True
-    core = prev.reason or prev.anchor or "回应偏了仪态,请保持芽衣的从容与有用。"
+    # reason 机械防线:剥指令句(09-08 裁决 3a) —— 剥过则打 sanitized 标记。
+    raw = prev.reason or prev.anchor or ""
+    clean, hit = sanitize_reason(raw)
+    prev.sanitized = hit
+    if clean:
+        core = clean
+    elif raw:
+        # 描述部分被全剥光 → 只剩落锚还在,给一句不越界的兜底描述(不重复指令词)
+        core = (prev.anchor or "").strip() or "该回应与芽衣的声音或有用性有偏差,详情见质检面板。"
+    else:
+        core = prev.anchor or "回应偏了仪态,请保持芽衣的从容与有用。"
     return f"{SHELL_PREFIX}{core}", True
 
 
