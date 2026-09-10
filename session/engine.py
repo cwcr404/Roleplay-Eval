@@ -554,7 +554,7 @@ class SessionEngine:
     # L2 蒸馏巡检 —— 三触发 + 防抖 + 双计数 + 降级,(卡点2攒批输入)见下
     # 触发规格(docs/memory_architecture §三 + L2 蒸馏规格 2026-09-08):
     #   · 常规 = 每 10 轮实测对话触发一次
-    #   · 强制 = 现有 L2 画像超 500 token 上限 -> 即时压缩
+    #   · 强制 = 现有 L2 画像超 500 字符上限 -> 即时压缩
     #   · 特例 = ②剧情级共同经历/③情绪显著/④承诺约定 事件入账即触发
     #   · 防抖 = 两次蒸馏间隔 >= N 轮(特例风暴时合并到轮末批量,不必每事件都蒸)
     #   · 攒批 = 每次吃的输入是『events_seen 之后全部新增事件』,非仅触发那几条
@@ -588,7 +588,7 @@ class SessionEngine:
                 "他是谁": prof.data.get("他是谁", "")}
 
     def _l2_over_budget(self) -> bool:
-        """现有 L2 画像是否超预算(强制触发)。统一读 CHAR_BUDGET(500 token 的字符安全代理)。"""
+        """现有 L2 画像是否超预算(强制触发)。统一读 CHAR_BUDGET(规格单位=字符,与规格数字同单位)。"""
         try:
             from kb.memory.distill import load_l2, CHAR_BUDGET
             prof = load_l2(self.user_id)
@@ -597,7 +597,8 @@ class SessionEngine:
         if prof is None:
             return False
         # 单一权威口径:三段(故事/他是谁…)字符总和 > CHAR_BUDGET 即视为超预算强制重蒸。
-        # (计量单位钉死:CHAR_BUDGET=500 字符 ⇒ 必然 ≤500 token,故不再逐字段另设 MAX_TOKENS*2 宽松线。)
+        # (计量单位钉死:规格单位=字符,CHAR_BUDGET 与规格数字同单位、同数字;
+        #  故不再逐字段另设 MAX_TOKENS*2 宽松线。)
         total = sum(len(str(v)) for v in prof.data.values() if isinstance(v, str))
         return total > CHAR_BUDGET
 

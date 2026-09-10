@@ -7,7 +7,7 @@ def audit(path):
     s = d["L2_our_story"]; w = d["L2_who"]; total = len(s) + len(w)
     print("== 程序化度量 ==")
     print(f"story_chars={len(s)}  who_chars={len(w)}  total={total}")
-    print(f"under_500char_headroom(元口径=500 token 非硬字符): total<=500 ? {total<=500} | 超预算则引擎走定向压缩/截断")
+    print(f"under_500char_headroom(元口径=500 字符,与规格同单位): total<=500 ? {total<=500} | 超预算则引擎走定向压缩/截断")
     fence = (s + w).count("```")
     print(f"markdown代码围栏数量={fence}  含 `---WHO---` 分隔残留={('---WHO---' in s+w)}")
     for t in ["[闲聊]", "[攻略]", "```md", "json"]:

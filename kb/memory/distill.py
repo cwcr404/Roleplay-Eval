@@ -2,12 +2,12 @@
 """L2 蒸馏画像缓存(故事层,不衰减)。
 
 文档 §三:
-- 每 10 轮从 L1 蒸馏一次,硬上限 500 token,超限强制压缩。
+- 每 10 轮从 L1 蒸馏一次,硬上限 500 字符,超限强制压缩。
 - 蒸馏方向:「我们的故事」,不是「用户是什么人」。
 - L2 是身份层:永不衰减。
 - L2 是**缓存不是账本** —— 删除它必须能从 L1 完整重建(容灾验收项)。
 
-本模块只负责「缓存容器 + 重建入口 + token 预算」,真正的蒸馏(summarize via LLM)
+本模块只负责「缓存容器 + 重建入口 + 字符预算」,真正的蒸馏(summarize via LLM)
 由运行时注入 distill_fn(通常指向 prompts/distill_l2.md 调廉价模型)。
 为可测试与容灾,内置一个**确定性规则回退**(无 LLM 也能从 L1 重建最简画像)。
 """
@@ -21,22 +21,24 @@ from typing import Callable, Optional
 
 from ..relation.affinity import LedgerEvent
 
-# 与 memory_architecture §三 一致(规格以 token 计)
-MAX_TOKENS = 500
+# 与 memory_architecture §三 一致(规格单位:**字符**,钉死于 2026-09-10 清偿)
+MAX_TOKENS = 500  # 历史符号名(遗留:名字里的 TOKEN 是清偿前的口径)。
+#   清偿后的唯一权威口径:规格数字 500 的单位就是**字符**,enforce 执行同一单位、
+#   同一数字。符号名不再改名(改名会动到 import 面),但**语义以『字符』为准**。
 DISTILL_EVERY_N_TURNS = 10
 
-# ---- 计量单位钉死(2026-09-08 · 校准尾1) ----
-# 规格把 L2 产物顶在 ≤500 TOKEN。enforce 侧只有字符可数,不能拿『字符』当『token』
-# 硬混(中文字符≈0.6~0.7 token;454 中文字≈300 出头 token,曾经的安全是巧合不是保证)。
-# 钉法:enforce 一律用『字符数』,并取【绝对安全上界 CHAR_BUDGET = MAX_TOKENS 字符】。
-#   理由:对任一真实 CJK tokenizer,1 个字符至多耗 1 个 token(CJK≈0.6~0.7, ASCII≪1),
-#   故 ≤500 字符 ⇒ 必然 ≤500 token —— 永远满足规格,宁严不松。
-#   代价:比 DeepSeek 实测容量(500 token≈740+ 中文字)留了保守余量;若嫌挤,后续可换
-#   tokenizer 真数(如 tiktoken cl100k 近似 CJK)把容量放回 —— 届时只需改 CHAR_BUDGET 与
-#   一段文档,不动规格数字。规格数字(MAX_TOKENS=500)恒为唯一权威,enforce 侧是它的
-#   安全代理,不是第二个计量标准。
-# 派生量:故事层主诉与【他是谁】副产的 token 预算分工(500≈400/100)在 prompt 侧表达;
-#   enforce 只对『总和 500 字符』这一代理做机械封顶,不替 prompt 管内部配比。
+# ---- 计量单位钉死(2026-09-08 立 · 2026-09-10 清偿后口径收紧) ----
+# 权威口径(仅此一条):L2 预算规格以**字符**表述,enforce 侧执行同一单位、同一数字。
+#   规格数字恒为唯一权威,不存在第二套换算标准,也不存在『token 规格 + 字符代理』的
+#   旧口径。选字符的理由:确定性截断不依赖 tokenizer,单进程零依赖即可复现。
+# 安全余量(不是另一套标准,是副证):对任一真实 CJK tokenizer,1 字符至多耗 1 token
+#   (CJK≈0.6~0.7, ASCII≪1),故 500 字符 ⇒ 必然 ≤500 token —— 宁严不松。
+#   代价:比 DeepSeek 实测容量(≈740+ 中文字)留了保守余量;若嫌挤,后续可换 tokenizer
+#   真数把容量放回 —— 届时只改 CHAR_BUDGET 与一段文档,不动规格数字。
+#   注:『1 字符≤1 token』是选字符单位的**依据**,不是把字符当代理去换算 token 的开端;
+#   不要再写成『规格以 token 表述』(那是清偿前旧状态,已废)。
+# 派生量:故事层主诉与【他是谁】副产的预算分工(500≈400/100)在 prompt 侧表达;
+#   enforce 只对『总和 500 字符』做机械封顶,不替 prompt 管内部配比。
 
 # L2 画像的蒸馏状态（引擎级日志用结构化标记；不进芽衣可见注入文本）：
 #   ok                  = 真实 LLM 蒸馏成功（且未超预算截断）
@@ -49,9 +51,9 @@ STATUS_BUDGET_TRUNCATED = "budget_truncated"
 
 # 输出两段分隔行(distill_l2.md 与其对齐)
 WHO_SPLIT = "---WHO---"
-# enforce 用字符上界(绝对安全代理):见文件头『计量单位钉死』—— 1 字符≤1 token,
-# 故 CHAR_BUDGET=MAX_TOKENS 字符 ⇒ 必然 ≤MAX_TOKENS token,满足规格。
-# (原 MAX_TOKENS*2 把 1 字算成 0.5 token,是单位混用的隐患,已废弃。)
+# enforce 用字符上界(=规格单位本身,max_len_chars):见文件头『计量单位钉死』——
+# 规格单位就是字符,CHAR_BUDGET = MAX_TOKENS 与规格数字同单位、同数字。
+# (原 MAX_TOKENS*2 把 1 字算成 0.5 token,是单位混用的隐患,已废。)
 CHAR_BUDGET = MAX_TOKENS
 
 
