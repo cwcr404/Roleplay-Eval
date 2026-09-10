@@ -124,6 +124,11 @@ class SessionEngine:
         self._qc_judge_errors = 0         # judge 死亡计数器(尾巴一:非零即报警)
         self.quality_panel: list[dict] = []  # 判决落面板/日志(观测/验收读;防异步=没跑)
         self._qc_lock = threading.Lock()
+        # ---- 标记中途出现计数(改四·可观测):流式下正文中途冒 [闲聊]/[攻略] 无法
+        # 事后抹除,只能记日志+计数。这里按『单轮内可见流残留标记数』累加观察。
+        self._marker_mid_hits = 0            # 累计残留标记数(所有轮)
+        self._marker_mid_turns = 0           # 至少残留 1 个标记的轮数
+        self.marker_mid_log: list[dict] = []  # 每轮一条:{turn, hits, reply_head}
         self._history: list[tuple[str, str]] = []
         self._lock = threading.Lock()
         # ---- L2 蒸馏触发状态(会话级;非账本状态) ----
@@ -355,13 +360,48 @@ class SessionEngine:
             # 缺省分支(洞2):不重试不阻塞,记日志含原始首行;正文原样放行(人味闲聊)
             self._kb_log.append(
                 f"route_default:: first_line={first_line!r} → 按[闲聊]处理")
+            self._note_mid_markers(reply)
             return "闲聊", reply
         # 洞1:剥掉首行标记子串,确认无残留才放行
         rest = lines[1] if len(lines) > 1 else ""
         visible = strip_marker(first_line)
         if rest:
             visible = visible + "\n" + rest if visible else rest
+        self._note_mid_markers(visible)
         return mod, visible
+
+    def _note_mid_markers(self, visible: str) -> int:
+        """改四·可观测:记本轮可见流里残留的标记数(首行标记已被剥离,此处只数残留)。
+
+        流式下正文中途冒标记无法事后抹除 → 记日志+计数,冒烟观察频率;高频再考虑
+        正文侧缓冲。本方法只观测,不改写任何可见文本(不阻塞/不重生成)。
+        """
+        from .routing import count_markers
+        hits = count_markers(visible)
+        self.marker_mid_log.append({
+            "turn": self._total_turns + 1,  # +1:_total_turns 在 _route 后被 turn() 递增
+            "hits": hits,
+            "reply_head": (visible or "")[:30],
+        })
+        if hits > 0:
+            self._marker_mid_hits += hits
+            self._marker_mid_turns += 1
+            self._kb_log.append(
+                f"marker_mid:: 本轮可见流残留 {hits} 个标记(无法事后抹除,记档观察)")
+        return hits
+
+    def qc_marker_mid_hits(self) -> int:
+        """单轮内标记中途出现计数的累计器(改四仪表):可见流残留标记总数。"""
+        return self._marker_mid_hits
+
+    def qc_marker_mid_turns(self) -> int:
+        """至少残留 1 个标记的轮数(改四仪表分子)。"""
+        return self._marker_mid_turns
+
+    def marker_mid_rate(self) -> float:
+        """标记中途出现轮次率(残留轮数/总轮数)。冒烟观察项:常态应接近 0。"""
+        total = self._total_turns
+        return (self._marker_mid_turns / total) if total else 0.0
 
     def _compose_user_prompt(self, hist: str, user_msg: str) -> str:
         """把转写历史 + 当前言拼成一条 user prompt。

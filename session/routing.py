@@ -29,6 +29,27 @@ _MARKER_WS = r"[ \t\u3000]*"      # 半角/全角空格容忍
 _MARKER_RE = re.compile(rf"^\s*{_MARKER_OPEN}{_MARKER_WS}(闲聊|攻略){_MARKER_WS}{_MARKER_CLOSE}{_MARKER_WS}(.*)$", re.S)
 
 
+# 任意位置的标记子串(不锚行首) —— 用于『标记中途出现』计数(改四)。
+# 与 _MARKER_RE 同族(容忍全角括号/内部空白),但去掉 ^ 锚与 (.*)$ 尾巴。
+_MARKER_ANYWHERE_RE = re.compile(
+    rf"{_MARKER_OPEN}{_MARKER_WS}(闲聊|攻略){_MARKER_WS}{_MARKER_CLOSE}")
+
+
+def count_markers(text: str) -> int:
+    """统计一段文本里 `[闲聊]`/`[攻略]` 标记的**出现次数**(任意位置)。
+
+    改四【标记中途出现】的可观测原语：首行标记由 engine 剥离(洞1),但流式下
+    正文中途冒出的标记无法事后抹除 —— 只能记日志+计数。本函数只数,不删不判。
+    玩家可见流若命中>0,即说明该轮漏了标记(应记档观察频率)。
+    """
+    return len(_MARKER_ANYWHERE_RE.findall(text or ""))
+
+
+def visible_marker_hits(text: str) -> int:
+    """玩家可见流里残留的标记数(与 count_markers 同口径,语义名更明)。"""
+    return count_markers(text)
+
+
 def modality_from_first_line(first_line: str) -> Optional[str]:
     """从『首行文本』解析出标记；无合法标记返回 None（供缺省走 [闲聊]）。
 

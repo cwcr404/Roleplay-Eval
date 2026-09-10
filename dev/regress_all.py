@@ -22,6 +22,9 @@ def main():
     results['kb_selfcheck'] = _run_py('kb/selfcheck.py')
     results['kb_memory_selfcheck'] = _run_py('kb/memory_selfcheck.py')
     results['routing_block2'] = _run_py('-m', 'session.routing_probe')
+    results['marker_mid_observability'] = _run_py('-m', 'session.marker_mid_probe')
+    results['distill_demo'] = _run_py('-m', 'session.distill_demo')
+    results['distill_timetravel'] = _run_py('-m', 'session.distill_timetravel_check')
 
     ok = all(results.values())
     for k, v in results.items():
