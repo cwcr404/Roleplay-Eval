@@ -261,7 +261,9 @@ def distill(events: list[LedgerEvent], user_id: str,
                 return _enforce_budget(parsed)
         except Exception:
             pass
-        return _enforce_budget({"我们的故事": raw.strip()[:MAX_TOKENS * 3]})
+        # 不在此处再设中间截断——_enforce_budget 是唯一封顶点(500 字符安全上界)。
+        # (原 [:MAX_TOKENS * 3] 是残留的『×3』单位混用痕,已删;封顶口径恒为 CHAR_BUDGET。)
+        return _enforce_budget({"我们的故事": raw.strip()})
     return _enforce_budget(_rule_fallback(events, user_id))
 
 
