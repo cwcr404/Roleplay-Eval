@@ -24,3 +24,12 @@ data/memory/**
 # 自检/验收脚本生成的报告产物（非源码,随跑随变）
 session/selfcheck_report.txt
 output/**
+
+# 内部草稿（求职意向等,不进公开库）
+docs/_why_section_draft.md
+docs/_arch_section_draft.md
+docs/_security_audit_*.md
+docs/_gif_parked_*.md
+docs/_tag_commit_msg_draft.md
+_*.txt
+memory/
