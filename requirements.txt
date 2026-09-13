@@ -1,0 +1,8 @@
+# Roleplay-Eval 依赖
+#
+# 本项目的核心链路(评测闭环 / 记忆链 / 关系衰减)只依赖 Python 标准库,
+# 唯一的外部依赖是 python-dotenv(用于读取 .env 中的 API 密钥)。
+#
+# Python >= 3.9
+
+python-dotenv>=1.0.0

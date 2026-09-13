@@ -25,10 +25,63 @@
 
 > 注意:C 是为了评测速度快/准的**被测简化**,**不是**芽衣产品的真实形态。B 才是产品 demo 路线。三种素材同源,跑法不同。
 
+## 快速开始
+
+### 1. 环境准备
+
+```bash
+pip install -r requirements.txt   # 唯一外部依赖:python-dotenv
+cp .env.example .env              # 然后填入你的 DEEPSEEK_API_KEY
+```
+
+> 核心链路(评测闭环 / 记忆链 / 关系衰减)只依赖 Python 标准库;
+> `.env` 已被 `.gitignore` 忽略,密钥永不进 git。
+
+### 2. 本地自检(不调 API,零消耗)
+
+```bash
+python kb/selfcheck.py            # 检索层自检
+python -m dev.regress_all         # 全量回归
+```
+
+### 3. 跑一次评测
+
+```bash
+python run_eval.py                       # 默认跑 cases/cases_001.jsonl
+python run_eval.py cases/cases_001.jsonl --limit 1   # 只跑第一条(调试)
+python run_eval.py --help                # 看参数
+```
+
+链路:`cases.jsonl → 被测 Agent(角色卡 V2) → Judge(LLM-as-Judge) → report.md`
+
+### 4. 看报告
+
+```bash
+cat output/report.md
+```
+
+报告含每条 case 的:芽衣回复、Judge 评分(score/verdict/OOC)、亮点、问题、评语。
+
+### 5. (可选)真实多轮会话 · 带记忆/关系
+
+```bash
+python chat_session.py chat                    # 终端手动聊
+python chat_session.py replay scripts/replay_accept.jsonl   # 剧本回放
+python chat_session.py web --port 8765         # 单页 demo
+```
+
+> 首次运行会在 `KB_DATA_ROOT`(默认包内 `data/memory/`)自动创建记忆账本。
+> 该目录含对话隐私数据,**不入 git**;评测链路(`run_eval.py`)与记忆链路
+> (`chat_session.py`)物理隔离——评测为无状态单轮,不读不写账本。
+
 ## 目录结构
 
 ```
 roleplay-eval/
+├── run_eval.py     # 评测执行器入口(C 形态):cases → 被测Agent → Judge → report.md
+├── chat_session.py # 记忆/关系会话入口:chat / replay / web 三种前端
+├── requirements.txt
+├── .env.example    # 环境变量示例(复制为 .env 后填密钥)
 ├── cases/          # 评测 case(JSONL)
 ├── prompts/        # 三 Agent 被测系统 prompt(原样存档)
 ├── judge/          # Judge Agent prompt 与逻辑
@@ -109,6 +162,6 @@ python kb/selfcheck.py
   - [x] kb/selfcheck.py 本地自检通过
   - [x] docs/knowledge_architecture.md(架构决策 + 演进判据)
 - [ ] 三 Agent prompt 落盘
+- [x] 执行器(C 形态)—— `run_eval.py`,支持 `--limit` / `--help`
+- [x] 跑通 + `output/report.md`(端到端已验:1 条 case score=8/pass)
 - [ ] 50 条 case（当前 5 条骨架，待部署后以真实交互数据扩充）
-- [ ] 执行器(C 形态)
-- [ ] 跑通 + report.md

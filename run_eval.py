@@ -141,9 +141,22 @@ def run_case(case: dict, character_prompt: str, judge_prompt: str, model: str, k
 
 
 def main():
+    if "-h" in sys.argv or "--help" in sys.argv:
+        print(__doc__.strip())
+        print()
+        print("参数:")
+        print("  casefile       case 文件路径(JSONL),默认 cases/cases_001.jsonl")
+        print("  --limit N      只跑前 N 条(调试用)")
+        print("  -h, --help     显示本帮助")
+        print()
+        print("环境变量:")
+        print("  DEEPSEEK_API_KEY  必填,DeepSeek 密钥(放 .env)")
+        print("  DEEPSEEK_MODEL    选填,默认 deepseek-chat")
+        print("  KB_MODE           选填,默认 plain")
+        return
     # 评测隔离守卫:确认本进程未载入记忆/关系包(评测是无状态单轮链路)
     guard_eval_memory_isolated()
-    casefile = sys.argv[1] if len(sys.argv) > 1 else os.path.join(BASE_DIR, "cases", "cases_001.jsonl")
+    casefile = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("-") else os.path.join(BASE_DIR, "cases", "cases_001.jsonl")
     limit = None
     if "--limit" in sys.argv:
         idx = sys.argv.index("--limit")
