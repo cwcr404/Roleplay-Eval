@@ -1,4 +1,4 @@
-"""Roleplay-Eval v0.1 评测执行器(C 形态)。
+"""Roleplay-Eval v0.2 评测执行器(C 形态)。
 
 链路:cases.jsonl → Agent2(被测,角色化回复)→ Judge(评分)→ report.md
 
@@ -192,7 +192,7 @@ def main():
     os.makedirs(os.path.join(BASE_DIR, "output"), exist_ok=True)
     report_path = os.path.join(BASE_DIR, "output", "report.md")
     with open(report_path, "w", encoding="utf-8") as f:
-        f.write("# Roleplay-Eval v0.1 评测报告\n\n")
+        f.write("# Roleplay-Eval v0.2 评测报告\n\n")
         f.write(f"- case 数:{len(results)}\n- 模型:{model}\n- 维度:角色一致性\n- 时间:{time.strftime('%Y-%m-%d %H:%M')}\n\n")
         ok = [r for r in results if "judge" in r and r["judge"]]
         f.write("## 汇总\n\n")

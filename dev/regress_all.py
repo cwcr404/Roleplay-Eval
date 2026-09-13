@@ -25,6 +25,7 @@ def main():
     results['marker_mid_observability'] = _run_py('-m', 'session.marker_mid_probe')
     results['distill_demo'] = _run_py('-m', 'session.distill_demo')
     results['distill_timetravel'] = _run_py('-m', 'session.distill_timetravel_check')
+    results['decay_purefunc'] = _run_py('-m', 'session.decay_probe')
 
     ok = all(results.values())
     for k, v in results.items():
