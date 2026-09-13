@@ -25,7 +25,7 @@ data/memory/**
 session/selfcheck_report.txt
 output/**
 
-# 内部草稿（求职意向等,不进公开库）
+# 内部草稿（不进公开库）
 docs/_why_section_draft.md
 docs/_arch_section_draft.md
 docs/_security_audit_*.md
