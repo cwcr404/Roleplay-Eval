@@ -68,7 +68,7 @@ def strip_marker(first_line: str) -> str:
     """把首行里的标记子串剥掉，返回不含标记的正文起始（洞1 剥离）。
 
     只剥离行首成形的 `[闲聊]`/`[攻略]` 标记本身；若首行不含成形标记则原样返回
-    （缺省分支由调用方决定不放行自由文本,见 decompose_first_chunk）。
+    （缺省分支由调用方决定不放行自由文本，见 `session/engine.py::_route_from_reply`）。
     注意:剥的是『标记 token』,正文后续的换行/空白原样保留给上层继续拼流。
     """
     m = _MARKER_RE.match(first_line or "")
