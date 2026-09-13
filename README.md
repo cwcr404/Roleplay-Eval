@@ -75,7 +75,7 @@ python kb/selfcheck.py
   但**真实对话分布下的触发面尚未观测** —— 真实模型多久真正触发一次修正壳、
   注入率的真实量级是多少,须等公网部署后的**首批真实数据**校验。
   这是**有意保留的验证边界,不是遗漏**:红线要求不得用模拟数据冒充真实触发面,
-  故此处只声明边界,不填假账。部署后以 `qc_injection_rate()`(常态应 <0.2)
+  故此处只声明边界,不填假账。部署后以 `qc_injection_rate()`(常态应 `<0.2`)
   与 `marker_mid_rate()` 两个仪表首批真实读数校准。
 
 - **标记中途出现(改四·常态观察项)**
@@ -109,6 +109,6 @@ python kb/selfcheck.py
   - [x] kb/selfcheck.py 本地自检通过
   - [x] docs/knowledge_architecture.md(架构决策 + 演进判据)
 - [ ] 三 Agent prompt 落盘
-- [ ] 20 条 case
+- [ ] 50 条 case（当前 5 条骨架，待部署后以真实交互数据扩充）
 - [ ] 执行器(C 形态)
 - [ ] 跑通 + report.md
