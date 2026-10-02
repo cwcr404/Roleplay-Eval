@@ -1,5 +1,5 @@
 # coding: utf-8
-"""L2 真实蒸馏链路 demo —— 供迟旭/莉莉安过目(本地可跑,不烧真 token)。
+"""L2 真实蒸馏链路 demo —— 供维护者过目(本地可跑,不烧真 token)。
 
 覆盖:
   场景 A:成功路径 —— 特例触发 -> 真实 LLM 蒸馏 -> save_distilled(ok)

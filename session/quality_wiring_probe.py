@@ -1,7 +1,7 @@
 # coding: utf-8
 """session/quality_wiring_probe —— Agent3 异步质检进 engine 的接线验收桩(离线 0 API)。
 
-对齐编排 doc §三 + 09-08 分岔裁决A(验收口径)/首府五改:
+对齐编排 doc §三 + 09-08 分岔裁决A(验收口径)/维护者五改:
   1. 质检壳【上一轮质检意见:】进 Agent2 用户侧输入流(【附】格),不进 system/人格块。
   2. 壳内只有描述(reason 经机械防线剥过),零指令词泄漏。
   3. quality_prompt=None(评测/回放/selfcheck默认) → 壳永不出、judge 永不调(零影响)。

@@ -3,7 +3,7 @@
 
 用真 DeepSeek 驱动：(1) agent2 真产出 3 条不同形态回复(闲聊入戏 / 攻略引子 /
   客服腔陷阱)→ 便于 (2) 让真实 agent3 异步质检判决对它们各判一次。
-产出:3 条 run sample(通过/拦截/边界) + 判决 JSON,便于迟旭审阅。
+产出:3 条 run sample(通过/拦截/边界) + 判决 JSON,便于维护者审阅。
 
 默认只打剧本:真实判定留痕不易;本脚本未 mock judge —— 全真。
 用法:python -m session.agent3_real_samples

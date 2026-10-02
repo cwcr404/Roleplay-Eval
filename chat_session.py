@@ -36,7 +36,7 @@ def _engine(user_id: str, clock=None, extract_ok=True) -> SessionEngine:
 # ---------------- CLI 手动聊（前端之一） ----------------
 def cmd_chat(args) -> int:
     from session.engine import build_session_engine
-    from kb.retriever import build_kb  # 产品线 CLI:真 KB 预查(0908第二块案A,迟旭今日拍板)
+    from kb.retriever import build_kb  # 产品线 CLI:真 KB 预查(0908第二块案A,维护者今日拍板)
     kb = build_kb(retriever_mode=os.getenv("KB_MODE", "plain"))
     eng = build_session_engine(args.user, kb=kb)
     print(f"芽衣会话已开 (user={args.user} · KB已接) | 输入 bye 退出, /reset 清空历史\n")

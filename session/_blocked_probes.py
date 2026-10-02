@@ -1,5 +1,5 @@
 # coding: utf-8
-"""session/_blocked_probes.py —— 回归探针集(09-08 首府裁决 3b)。
+"""session/_blocked_probes.py —— 回归探针集(09-08 维护者裁决 3b)。
 
 目的:把『blocked 路径没有生锈』固化进每版本回归。用真应答样式的坏回复 × 金标
 预期判决,走确定性 judge 桩(注入 llm_chat 返回探针金标 JSON),断言 parse→decision
