@@ -200,7 +200,7 @@ def main():
         for r in results:
             if "judge" in r and r["judge"]:
                 j = r["judge"]
-                f.write(f"| {r['id']} | {r['category']} | {j.get('score','?')} | {j.get('verdict','?')} | {j.get('ooc_detected','?')} |\n")
+                f.write(f"| {r.get('id')} | {r.get('category')} | {j.get('score','?')} | {j.get('verdict','?')} | {j.get('ooc_detected','?')} |\n")
             else:
                 f.write(f"| {r.get('id')} | {r.get('category')} | 错误 | - | - |\n")
         f.write("\n## 明细\n\n")

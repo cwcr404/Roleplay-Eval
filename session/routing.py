@@ -80,6 +80,11 @@ def strip_marker(first_line: str) -> str:
 def decompose_first_chunk(chunk: str, *, eol: str = "\n") -> tuple[Optional[str], str, str]:
     """把『流式首块』按行拆解,产出 (modality, 已剥离标记的首行剩余, 缓冲待定)。
 
+    【当前未接线】——暂无调用方。engine 现走 _route_from_reply(聚合后整块路由),
+    本函数为『token 级流式首块拆解』预留:待流式组装层需要逐块判定首行标记时接入,
+    届时由 routing_probe 覆盖单测。保留而非删除:设计已完成且零依赖,删除等于
+    未来重写。(f799591 勘记已存档此状态。)
+
     洞1「先解析再放行」两段式的纯函数基础：
       - 首块可能只含半行（标记还没吐完 / 正文没到），或整行已经齐。
       - 这里返回：

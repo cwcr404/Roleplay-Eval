@@ -6,6 +6,7 @@
 import os
 import json
 import time
+import random
 import urllib.request
 from collections.abc import Iterator
 
@@ -62,7 +63,10 @@ def chat(
         except Exception as e:  # noqa: BLE001
             last_err = e
             if attempt < max_retries:
-                time.sleep(1.0)  # 简单退避
+                # 指数退避 + 抖动:1s×2^attempt 基础上加 [0,0.5)s 抖动,
+                # 避免多请求同时重试造成的节拍对齐(惊群)。无新依赖。
+                backoff = 1.0 * (2 ** attempt)
+                time.sleep(backoff + random.uniform(0.0, 0.5))
     raise DeepSeekError(f"DeepSeek 调用失败: {last_err}")
 
 
