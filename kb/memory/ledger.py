@@ -187,7 +187,10 @@ class Ledger:
         """
         if outcome_type not in PROMISE_SETTLE_TYPES:
             return None
-        cands = self.open_promises(as_of_time=_now_utc_ts())
+        # 时间权威:筛选候选承诺必须与本条结算入账同源 —— 用调用方传入的 ts
+        # (可空,空则回退墙钟)。若这里硬用墙钟,replay 推进到未来再结算时,
+        # 未来立的约在真实 now 下不可见 → 结算落空返回 None(时间权威分裂)。
+        cands = self.open_promises(as_of_time=ts if ts is not None else _now_utc_ts())
         if not cands:
             return None
         hit = None

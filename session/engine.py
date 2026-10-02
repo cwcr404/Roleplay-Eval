@@ -44,7 +44,7 @@ LORE_TOP_K = 2
 
 # 前置装配段(产品线内嵌路由,拼装顺序见 _system_for_turn —— 人格卡最前→此段→记忆外挂):
 # 让芽衣在回复首行自报 [闲聊]/[攻略],engine 据此分叉并剥离(标记绝不见于玩家可见流)。
-# 路由器只做路由,不做导演 —— 演法归人格块,单一事实源归位(09-08 首府改五定稿措辞)。
+# 路由器只做路由,不做导演 —— 演法归人格块,单一事实源归位(09-08 维护者改五定稿措辞)。
 _ROUTING_ASSEMBLY = (
     "【本轮输出格式指令·装配层】\n"
     "请在回复的【第一行】用方括号声明本条类型:[闲聊] 或 [攻略]。\n"
@@ -245,7 +245,14 @@ class SessionEngine:
     # ------------------------------------------------------------------
     def turn(self, user_msg: str, *, reply_hook: Optional[Callable] = None,
              force_no_event: bool = False) -> TurnResult:
-        """跑一轮:装配记忆 → Agent2 回复 → (异步)书记员抽取入账。
+        """跑一轮:装配记忆 → Agent2 回复 → 书记员抽取入账。
+
+        时序说明(纠正旧『异步』措辞):书记员抽取【同步容错】执行 —— 失败/解析错
+        对主链路无影响(见 _maybe_extract 的 try/except → None),但它不在单独
+        线程里跑,故本方法返回前书记员已收工。这【不是】Agent3 质检那种可折下一
+        轮的异步:书记员的产出(_pending_distill_signals)由同轮 _maybe_distill
+        消费,存在【同轮因果依赖】,挂线程会漏触发特例蒸馏。需要真异步时由上层
+        前端决定(如 web 端把整轮放队列),不在引擎内拆。
 
         reply_hook: 若提供,退出该轮时把已入账事件也交给它(web 回写等用)。
         force_no_event: True 时不跑抽取(评测隔离等场景),默认 False。
@@ -271,7 +278,7 @@ class SessionEngine:
             self._history = self._history[-self.history_turns:]
             self._total_turns += 1  # 单调总轮数(常规蒸馏 cadence 基准;不受 history 裁剪影响)
 
-        # --- 2. 书记员抽取(独立、冷面;不阻塞上面回复) ---
+        # --- 2. 书记员抽取(独立、冷面;同步容错 —— 见 turn() docstring 时序说明) ---
         ev = None
         if not force_no_event and self.extractor_prompt:
             ev = self._maybe_extract(user_msg, reply)
