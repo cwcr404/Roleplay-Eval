@@ -117,6 +117,43 @@ class UserMemory:
         return self.ledger.size() <= prof.events_seen
 
 
+    # ---- L3 注入路径(找用分离:找在本地零 LLM) ----
+    def _l3_store(self):
+        """懒加载 L3 store(隔离由 user_id 保证)。"""
+        if not hasattr(self, "_l3_store_cache"):
+            from .l3_store import L3Store
+            self._l3_store_cache = L3Store(self.user_id)
+        return self._l3_store_cache
+
+    def l3_hits(self, query: str, *, k: int = 3, now=None,
+                evoke: bool = False):
+        """找:本地词法检索 L3 → list[Hit](含命中媒介/是否降级)。
+
+        evoke=True 时对命中的条目唤起(被动应答,不耗主动配额)。
+        零 LLM:检索全在本地词法层完成。
+        """
+        from .bundle import Hit
+        import time as _t
+        now = now if now is not None else _t.time()
+        store = self._l3_store()
+        hits = []
+        for it, cnt in store.retrieve(query, k=k, now=now):
+            faded = it.in_refractory(now)
+            if evoke and not faded:
+                store.evoke(it.id, now=now, active=False)   # 被动:不耗配额
+            hits.append(Hit(item=it, medium=f"命中{cnt}词", faded=faded))
+        return hits
+
+    def injection(self, query: str = "", *, k: int = 3, now=None) -> str:
+        """注入出口(与 l2() 同出口):关系块 + 记忆块。
+
+        返回可注入文本;结构化状态(degraded/status)不进文本。
+        """
+        from .bundle import build_bundle
+        hits = self.l3_hits(query, k=k, now=now) if query else []
+        return build_bundle(self.l2(), hits).text
+
+
     def rebuild_l2(self, distill_fn: Optional[Callable[[str], str]] = None) -> L2Profile:
         """删除后重建 L2(容灾验收标准 3)。"""
         delete_l2(self.user_id)
