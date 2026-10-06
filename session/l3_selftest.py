@@ -215,6 +215,98 @@ check("深夜记账 date 字段=当天 10-06",
       s6.active_items()[0].date == "2026-10-06", s6.active_items()[0].date)
 check("每日限额也按 GMT+8 日界统计", True)
 
+# ── 11. 出口规则：配额 / 不应期 / 浮现关主动 ──
+print("\n[11] 出口规则（主动进口配额 + 不应期 + 浮现关主动）")
+from kb.memory.l3_store import EntryQuota, FIRST_POP_MAX_EVOKED  # noqa: E402
+
+s7 = L3Store("u_quota")
+n1 = {"content": "他说想一起去看海", "tags": "亲近×期待",
+      "intensity": 8, "storage": 8, "scene_words": ["天气", "约定"]}
+s7.nominate(n1, implicit=True)
+n2 = {"content": "他第一次给我带早餐", "tags": "亲近×暖意",
+      "intensity": 7, "storage": 7, "scene_words": ["早餐", "食物"]}
+s7.nominate(n2, implicit=True)
+
+item_a = s7.active_items()[0]
+# t0：无浮现历史 → 允许
+allow, why = EntryQuota.active_entry_allowed(s7, item_a.last_evoked)
+check("无浮现历史 → 配额允许", allow, why)
+# 主动进口一次后，14 天内 → 不允许（配额窗口）
+s7.evoke(item_a.id, now=item_a.last_evoked, active=True)
+allow2, why2 = EntryQuota.active_entry_allowed(
+    s7, item_a.last_evoked + 86400 * 3)
+check("14天内已主动进口 → 配额拦截", not allow2, why2)
+# 15 天后 → 允许
+allow3, why3 = EntryQuota.active_entry_allowed(
+    s7, item_a.last_evoked + 86400 * 15)
+check("超出14天窗口 → 配额允许", allow3, why3)
+
+# 单条闸门：浮现次数 >1 → 关
+check("浮现次数=1 → 单条合格", EntryQuota.item_eligible(item_a, item_a.last_evoked + 86400 * 4),
+      "evoked=" + str(item_a.evoked_count))
+s7.evoke(item_a.id, now=item_a.last_evoked + 86400 * 15, active=True)
+check("浮现次数=2 → 关主动进口", not EntryQuota.item_eligible(item_a, item_a.last_evoked + 86400 * 20),
+      "evoked=" + str(item_a.evoked_count))
+
+# pick：端到端
+pick7, why7 = EntryQuota.pick_active_entry(s7, item_a.last_evoked + 86400 * 40)
+check("pick 在无合格候选时返回 None", pick7 is None, why7)
+
+# 另一用户：健康候选可被 pick 中
+s8 = L3Store("u_pick")
+s8.nominate({"content": "暴雨天他来接我", "tags": "亲近×感动",
+             "intensity": 9, "storage": 9, "scene_words": ["雨", "天气"]},
+            implicit=True)
+pk = s8.active_items()[0]
+pick8, why8 = EntryQuota.pick_active_entry(s8, pk.last_evoked)
+check("健康候选可被 pick", pick8 is not None and pick8.id == pk.id, why8)
+
+# 沉睡条目不被 pick
+s9 = L3Store("u_dormant_pick")
+s9.nominate({"content": "很久以前的小事", "tags": "a×b",
+             "intensity": 7, "storage": 7, "scene_words": ["烟花", "仪式"]},
+            implicit=True)
+pk9 = s9.active_items()[0]
+pick9, why9 = EntryQuota.pick_active_entry(s9, pk9.last_evoked + 86400 * 200)
+check("沉睡条目不被 pick", pick9 is None, why9)
+
+# ── 12. 甲字段：被动唤起不耗主动配额 ──
+print("\n[12] 甲字段：被动唤起不耗主动配额")
+s10 = L3Store("u_passive")
+s10.nominate({"content": "他半夜给我发了一首歌", "tags": "亲近×感动",
+              "intensity": 8, "storage": 8, "scene_words": ["夜宵", "食物"]},
+             implicit=True)
+it10 = s10.active_items()[0]
+# 被动唤起（用户问到）
+s10.evoke(it10.id, now=it10.last_evoked, active=False)
+check("被动唤起后 last_active_entry 仍为0", it10.last_active_entry == 0.0,
+      "last_active_entry=" + str(it10.last_active_entry))
+allow_p, why_p = EntryQuota.active_entry_allowed(s10, it10.last_evoked + 3600)
+check("被动唤起后配额仍允许（不被误耗）", allow_p, why_p)
+# 主动进口才计
+s10.evoke(it10.id, now=it10.last_evoked + 7200, active=True)
+allow_p2, why_p2 = EntryQuota.active_entry_allowed(s10, it10.last_evoked + 7200 + 3600)
+check("主动进口后配额被计（14天内拦截）", not allow_p2, why_p2)
+
+# ── 13. 不应期 72h：降级不耗配额 ──
+print("\n[13] 不应期 72h：降级通道")
+s11 = L3Store("u_refract")
+s11.nominate({"content": "那棵银杏树下他说了话", "tags": "亲近×郑",
+              "intensity": 9, "storage": 9, "scene_words": ["雪", "天气"]},
+             implicit=True)
+it11 = s11.active_items()[0]
+# 刚浮现（被动）
+s11.evoke(it11.id, now=it11.last_evoked, active=False)
+check("刚浮现 → 处于不应期", it11.in_refractory(it11.last_evoked + 3600))
+check("72h 内再触碰 → 降级（不可主动进口）",
+      not EntryQuota.item_eligible(it11, it11.last_evoked + 3600))
+faded = EntryQuota.render_faded(it11)
+check("降级文案为一句确认", "银杏" in faded and len(faded) < 30, faded)
+# 降级不耗配额（74h 后检）
+allow_r, why_r = EntryQuota.active_entry_allowed(s11, it11.last_evoked + 3600)
+check("降级不耗配额（无主动进口记录）", allow_r, why_r)
+check("72h 后离开不应期", not it11.in_refractory(it11.last_evoked + 74 * 3600))
+
 print("\n" + "=" * 62)
 print(f"结果：{PASS} 通过 / {FAIL} 失败")
 print("=" * 62)

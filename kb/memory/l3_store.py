@@ -43,6 +43,14 @@ DORMANT_THRESHOLD: int = 2            # 沉睡：extraction ≤ 此值
 ACTIVE_ENTRY_MIN_EXTRACTION: int = 6  # 主动进口候选：extraction ≥ 此值
 _CONTENT_SIM_THRESHOLD: float = 0.8   # 内容高相似判据（字符级 Jaccard）
 
+# ── 出口规则（首府裁定 2026-10-06 · 出口规则）──────────────
+# 记忆应答免费（retrieve 不限流）；主动进口（芽衣主动提）才限流。
+QUOTA_WINDOW_DAYS: float = 14.0       # 主动进口配额窗口：14 天最多 1 次
+QUOTA_MONTH_WINDOW_DAYS: float = 30.0 # 月窗口
+QUOTA_MAX_PER_MONTH: int = 2          # 每 30 天最多 2 次
+FIRST_POP_MAX_EVOKED: int = 1         # 浮现次数 > 此值 → 关主动进口（提过就不再主动提）
+REFRACTORY_HOURS: float = 72.0        # 不应期（跨会话、条目级）：任何浮现后 72h 内再触碰→降级
+
 # 日界时区（首府立法 2026-10-06 · ③）：内部时间戳一律 UTC 绝对时间，
 # 所有【日界计算】（date 字段、每日限额的“一天”、按天衰减）按 Asia/Shanghai。
 # 理由：账本记的是他与芽衣的关系事件，用户说“今天”就是 GMT+8 的今天；
@@ -94,8 +102,25 @@ class L3Item:
     reason: str = ""                       # 提名理由
     evoked_count: int = 0                  # 浮现次数
     last_evoked: float = field(default_factory=_now_ts)
+    # 【仅主动进口专用】最后一次【主动进口】的时间戳，0=从未。
+    # 注意：当前为缓存字段（甲方案）；终态由 L1 active_entry 事件派生，
+    # 那时本字段降级为缓存（先查缓存，缺失/可疑时回查 L1 重建）。
+    # 不要把它当唯一真相源 —— 被动应答【不】更新此字段。
+    last_active_entry: float = 0.0
     created_ts: float = field(default_factory=_now_ts)
     status: str = "active"                 # active / pending_review(被限额拦截)
+
+    # ── 不应期（条目级、跟会话，72h）──
+    def in_refractory(self, now: Optional[float] = None) -> bool:
+        """任何浮现（主+被动）后 72h 内 → True（再触碰降级为一句话确认）。
+
+        注意：未浮现过的条目（evoked_count==0）不算在不应期内 ——
+        新建条目 last_evoked=创建时刻，但它还未「浮现」过，应可被主动进口。
+        """
+        if self.evoked_count <= 0:
+            return False
+        now = now if now is not None else _now_ts()
+        return (now - self.last_evoked) < REFRACTORY_HOURS * 3600.0
 
     # ── 惰性提取强度 ──
     def extraction_at(self, now: Optional[float] = None) -> int:
@@ -343,11 +368,19 @@ class L3Store:
                 self._persist_append(flag)
             return verdict
 
-    def evoke(self, item_id: str, now: Optional[float] = None) -> Optional[L3Item]:
-        """唤起：last_evoked=now，storage+1（封顶），浮现次数+1。"""
+    def evoke(self, item_id: str, now: Optional[float] = None, *,
+              active: bool = False) -> Optional[L3Item]:
+        """唤起：last_evoked=now，storage+1（封顶），浮现次数+1。
+
+        active=True 时同时更新 last_active_entry（仅主动进口）。
+        被动应答（用户问到）active=False，不耗主动配额。
+        """
+        now = now if now is not None else _now_ts()
         for it in self._items:
             if it.id == item_id:
                 merge_into(it, {"scene_words": []}, now)
+                if active:
+                    it.last_active_entry = now
                 return it
         return None
 
@@ -385,3 +418,95 @@ class L3Store:
 
     def index_size(self) -> int:
         return len(self._index)
+
+
+# ── 出口规则：主动进口配额 / 不应期 / 浮现关主动 ─────────────
+@dataclass
+class EntryQuota:
+    """主动进口配额状态（跟踪主动浮现的时间戳）。
+
+    裁定（出口规则）：
+    - 记忆应答免费（retrieve 不限流）；
+    - 主动进口配额 14 天 1 次 / 月 2 次；
+    - 不应期：刚浮现的不展开第二次；
+    - 浮现次数 >1 → 关主动进口（提过就不再主动提）。
+
+    持久化：每条 L3 条目的 last_evoked 已是“最近一次浮现”的记录，
+    本类不另存状态，全部从条目字段推导（“状态=查询派生”原则）。
+    """
+
+    @staticmethod
+    def active_entry_allowed(
+        store: "L3Store",
+        now: Optional[float] = None,
+        *,
+        quota_window_days: float = QUOTA_WINDOW_DAYS,
+        month_window_days: float = QUOTA_MONTH_WINDOW_DAYS,
+        max_per_month: int = QUOTA_MAX_PER_MONTH,
+    ) -> tuple[bool, str]:
+        """总闸门：当前时刻是否允许一次主动进口。返回 (允许, 理由)。
+
+        只统计【主动进口】（last_active_entry>0），被动应答不耗配额。
+        """
+        now = now if now is not None else _now_ts()
+        recent_14 = [
+            it for it in store.active_items()
+            if it.last_active_entry > 0
+            and _days_between(now, it.last_active_entry) < quota_window_days
+        ]
+        if recent_14:
+            return False, (
+                f"配额窗口内（{quota_window_days:.0f}天）已主动进口过"
+                f"（{recent_14[0].id}）"
+            )
+        recent_30 = [
+            it for it in store.active_items()
+            if it.last_active_entry > 0
+            and _days_between(now, it.last_active_entry) < month_window_days
+        ]
+        if len(recent_30) >= max_per_month:
+            return False, (
+                f"月窗口（{month_window_days:.0f}天）内已主动进口 {len(recent_30)} 次"
+                f"（上限 {max_per_month}）"
+            )
+        return True, "配额允许"
+
+    @staticmethod
+    def item_eligible(item: "L3Item", now: Optional[float] = None,
+                      *, max_evoked: int = FIRST_POP_MAX_EVOKED) -> bool:
+        """单条闸门：浮现次数 >1 → 关主动进口；沉睡跳过；不应期内跳过。"""
+        now = now if now is not None else _now_ts()
+        return (
+            item.evoked_count <= max_evoked
+            and not item.is_dormant(now)
+            and not item.in_refractory(now)
+        )
+
+    @staticmethod
+    def render_faded(item: "L3Item") -> str:
+        """不应期降级：不展开，只一句确认（不耗配额，无信息增量）。"""
+        head = (item.content or "")[:8]
+        return "（嗯，你说过" + head + "那件事）"
+
+    @classmethod
+    def pick_active_entry(
+        cls,
+        store: "L3Store",
+        now: Optional[float] = None,
+    ) -> tuple[Optional["L3Item"], str]:
+        """选一条可主动浮现的条目：总闸门 THEN 单条闸门 THEN 取 extraction 最高。
+
+        返回 (条目 or None, 理由)。
+        """
+        now = now if now is not None else _now_ts()
+        ok, why = cls.active_entry_allowed(store, now)
+        if not ok:
+            return None, why
+        cands = [
+            it for it in store.active_items()
+            if it.extraction_at(now) >= ACTIVE_ENTRY_MIN_EXTRACTION
+            and cls.item_eligible(it, now)
+        ]
+        if not cands:
+            return None, "无合格候选项（extraction≥6 且 浮现≤1 且 未沉睡且过不应期）"
+        return max(cands, key=lambda it: it.extraction_at(now)), "配额允许"
