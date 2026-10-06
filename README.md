@@ -163,6 +163,40 @@ python kb/selfcheck.py
 
 > 切割线:代码可自由使用、修改、分发(MIT);角色相关素材的权利归属不受 MIT 覆盖,复用时请自行确保合规。
 
+### 公开 / 内部 密级清单
+
+> 本仓库当前**私有**。开源前必须逐项过一遍下表,尤其「内部」列中的
+> 崩三语料、官方原句与转写标注——它们含版权素材,不能随仓库公开。
+
+**随仓库公开(MIT 覆盖)**
+
+| 路径 | 说明 |
+|---|---|
+| `kb/**/*.py`, `judge/*.py`, `utils/**`, `scripts/**` | 全部源码 |
+| `prompts/**`, `data/character_card_*.md` | 提示词与角色卡(已去污染) |
+| `anchors/anchors_role_consistency_*.json` | **自撰锚点池**(风格特征句,无崩三元素) |
+| `anchors/anchors_scene_v1.json` | 场景锚点(推演产物) |
+| `docs/**`, `README.md` | 文档 |
+| `cases/**` | 评测用例(自撰) |
+
+**内部底稿 · 开源前须清洗或不随仓库(NOT 公开)**
+
+| 路径 | 风险 | 处置 |
+|---|---|---|
+| `kb/sources/_bh3_mei_late.md` | 崩三语音文本转录,版权属米哈游 | 清洗或移出公开库 |
+| `anchors/gold/gold_official_v1.json` | **官方原句直用**(17条) | 清洗或移出 |
+| `anchors/transcribed_v1.json` | 转写自官方(4条) | 清洗或移出 |
+| `anchors/period/period_anchors_v1.json` | 含官方原句(格言/宣言) | 清洗或移出 |
+| `anchors/negatives/negatives_official_v1.json` | 官方战斗腔/评级腔原句 | 清洗或移出 |
+| `anchors/validity/validity_pack_v1.json` | 引用上述样本 | 随样本处置 |
+| `anchors/_candidates_*.md` | 内部工作草稿 | 建议不入公开库 |
+| `docs/_*_draft.md`, `docs/_jd_archive.md` | 内部草稿/个人留档 | 已在 .gitignore |
+| `dev/_*.py` | 一次性分析脚本 | 已在 .gitignore |
+| `data/memory/`, `memory/` | 运行时记忆数据(个人) | 已在 .gitignore |
+
+> 另:依 09-21 裁定,「L3 公开效果叙事、不公开如何达成」——L3 的设计细节
+> 与实现若涉及方法论护城河,公开文档只写**做了什么**(效果),不写**怎么做到**(实现路径)。
+
 ---
 
 ## 状态
@@ -176,7 +210,8 @@ python kb/selfcheck.py
   - [x] 方案 A:检索结果注入 Agent2 上文(按 case 分类的隔离策略)
   - [x] kb/selfcheck.py 本地自检通过
   - [x] docs/knowledge_architecture.md(架构决策 + 演进判据)
-- [ ] 三 Agent prompt 落盘
+- [x] 三 Agent prompt 落盘（agent1 意图路由 / agent2 角色化 / agent3 质检同步+异步）
+- [x] 辅助 prompt：L2 蒸馏（distill_l2.md）、事件抽取（extractor_event.md）
 - [x] 执行器(C 形态)—— `run_eval.py`,支持 `--limit` / `--help`
 - [x] 跑通 + `output/report.md`(端到端已验:1 条 case score=8/pass)
 - [ ] 50 条 case（当前 5 条骨架，待部署后以真实交互数据扩充）

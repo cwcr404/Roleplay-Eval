@@ -32,8 +32,16 @@ docs/_security_audit_*.md
 docs/_gif_parked_*.md
 docs/_tag_commit_msg_draft.md
 _*.txt
-memory/
+
+# 运行时记忆数据(合规红线:记忆数据一个字节不进 git)
+# 关键:不用裸 'memory/' —— 它匹配任意层级,会误伤源码包 kb/memory/。
+# 按位置锚定:'/memory/' 只匹配仓库根的 memory/,不碰 kb/memory/。
+data/memory/
+/memory/
+kb/memory/__pycache__/
 
 # 本地私用(求职/JD 留档,不进公开库)
 docs/_jd_archive.md
 _audit_tmp.py
+# 一次性分析脚本(产物已入库,脚本复现价值低,不进公开库)
+dev/_*.py
