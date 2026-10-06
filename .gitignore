@@ -45,5 +45,8 @@ docs/_jd_archive.md
 _audit_tmp.py
 # 一次性分析脚本(产物已入库,脚本复现价值低,不进公开库)
 dev/_*.py
+# 观测台起服务的运行日志(随跑随变)
+obs*.log
+session/obs*.log
 # 内部备忘(分支管理/临时事项)
 dev/NOTES.md
