@@ -52,3 +52,8 @@ session/obs*.log
 dev/NOTES.md
 # 用量账本落盘产物(随跑随变;结构见 utils/api._record_usage)
 dev/_usage_ledger.jsonl
+
+# P0-3 �ز���ʱ����
+assets/characters/_candidates/_tiles/
+assets/characters/_candidates/font.ttf
+

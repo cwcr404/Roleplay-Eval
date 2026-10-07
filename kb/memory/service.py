@@ -144,6 +144,24 @@ class UserMemory:
             hits.append(Hit(item=it, medium=f"命中{cnt}词", faded=faded))
         return hits
 
+    # ---- 角色回忆证据路(P0-3:角色名走主索引,零命中不造记忆) ----
+    def role_memory(self, role: str, *, k: int = 3, now=None) -> list:
+        """找(第三路):某角色的**库内真条目**(证据路)。
+
+        纪律(首府 2026-10-07 裁定):
+        - 与情绪通道**相反**:角色名是专有名词 → 语义收敛 → 挂倒排主索引,
+          不学情绪走独立通道。
+        - 双路信号解耦:氛围路(前端背景)不依赖库;证据路=这里,只给真条目。
+        - **零命中不造记忆** —— 库里没该角色的条目就返回空,不猜。
+
+        返回 list[(L3Item, 命中词数)],按 extraction_at 倒序,截断 k。
+        """
+        import time as _t
+        if not role:
+            return []
+        now = now if now is not None else _t.time()
+        return list(self._l3_store().retrieve_by_role(role, k=k, now=now))
+
     # ---- 情绪通道(通道乙:独立于场景词,零 LLM) ----
     def emotion_hits(self, query: str, *, top_n: int = 3,
                      now=None) -> list:

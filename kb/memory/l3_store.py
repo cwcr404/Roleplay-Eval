@@ -32,6 +32,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from .l3_vocab import expand_scene_words, is_valid_scene_key
+from .roles import tag_characters
 
 # ── 常量 ────────────────────────────────────────────────────
 HALF_LIFE_DAYS: float = 14.0          # 半衰期，与主动进口配额同律
@@ -109,6 +110,11 @@ class L3Item:
     last_active_entry: float = 0.0
     created_ts: float = field(default_factory=_now_ts)
     status: str = "active"                 # active / pending_review(被限额拦截)
+    # ── 角色标（首府 2026-10-07 工单 P0-3）──
+    # 入账时命中角色词典即打标（规范名列表，如 ["琪亚娜", "芽衣"]）。
+    # 旧条目无此字段 → 默认空列表（向后兼容）；回填由工具批次做。
+    # 零命中 = 空列表（不猜角色，没提不亮）。
+    characters: list[str] = field(default_factory=list)
 
     # ── 不应期（条目级、跟会话，72h）──
     def in_refractory(self, now: Optional[float] = None) -> bool:
@@ -234,11 +240,25 @@ class SceneIndex:
         self._postings: dict[str, set[str]] = {}
 
     def add(self, item: L3Item) -> None:
-        for w in item.scene_words:
+        for w in self._scene_keys_of(item):
             self._postings.setdefault(w, set()).add(item.id)
 
+    @staticmethod
+    def _scene_keys_of(item: L3Item) -> list[str]:
+        """条目的全部索引键 = scene_words + 角色标。
+
+        角色名进主索引（首府 P0-3 裁定：专有名词本就是倒排索引合法居民），
+        否则「琪亚娜」永远勾不出那条记忆。读时合并（不写回 scene_words，
+        保持 L3Item.scene_words 语义纯净）。
+        """
+        keys = list(item.scene_words)
+        for c in getattr(item, "characters", ()) or ():
+            if c not in keys:
+                keys.append(c)
+        return keys
+
     def remove(self, item: L3Item) -> None:
-        for w in item.scene_words:
+        for w in self._scene_keys_of(item):
             s = self._postings.get(w)
             if s:
                 s.discard(item.id)
@@ -308,11 +328,16 @@ def _boundary_ok(text: str, key: str, pos: int) -> bool:
 
 
 def decompose_query(text: str) -> list[str]:
-    """把一条用户消息本地分解为场景词（三层扩展）。
+    """把一条用户消息本地分解为场景词（三层扩展 + 角色名）。
 
     零 LLM、毫秒级、每轮必跑（无论情绪强度）。
     与写入侧共用 l3_vocab 的 expand_scene_words，保证写读对称。
     词边界：所有 key 按整词匹配（防子串误判，见 _boundary_ok）。
+
+    角色名（首府 2026-10-07 P0-3 裁定）：
+      角色名是**专有名词**，本就该是倒排索引的合法居民 → 直接进场景词集合，
+      不学情绪词走独立通道。角色名由 roles.decompose_roles 本地识别（零 LLM）。
+      **不猜**：没提角色就不加任何角色词。
     """
     from .l3_vocab import HYPERNYM_MAP, SITUATION_MAP
 
@@ -339,6 +364,9 @@ def decompose_query(text: str) -> list[str]:
     ordered = sorted(HYPERNYM_MAP.keys(), key=len, reverse=True)
     _scan(ordered)
     _scan(sorted(SITUATION_MAP.keys(), key=len, reverse=True))
+    # 角色名进主索引（专有名词，非独立通道）；零命中即不加（不猜）
+    from .roles import decompose_roles
+    found.extend(decompose_roles(text))
     return expand_scene_words(found)
 
 
@@ -411,6 +439,9 @@ class L3Store:
                     last_evoked=now,
                     created_ts=now,
                     status="active",
+                    # 角色标：入账即打（零 LLM，命中词典才打；不猜）
+                    characters=nominee.get("characters")
+                    or tag_characters(nominee.get("content", "")),
                 )
                 self._items.append(item)
                 self._index.add(item)
@@ -429,6 +460,8 @@ class L3Store:
                     scene_words=list(nominee.get("scene_words", [])),
                     reason=f"[待复核] {verdict.reason}",
                     status="pending_review",
+                    characters=nominee.get("characters")
+                    or tag_characters(nominee.get("content", "")),
                 )
                 self._items.append(flag)
                 self._persist_append(flag)
@@ -463,6 +496,25 @@ class L3Store:
             if it and it.status == "active":
                 out.append((it, cnt))
         out.sort(key=lambda p: (-p[1], -p[0].extraction_at(now)))
+        return out[:k]
+
+    def retrieve_by_role(self, role: str, *, k: int = 5,
+                         now: Optional[float] = None
+                         ) -> list[tuple[L3Item, int]]:
+        """按角色标检索（证据路专用）：返回带有该角色标的 active 条目。
+
+        首府 P0-3 裁定：
+        - 氛围路 = 命中角色词典即可亮（不依赖库，见 roles.decompose_roles）
+        - 证据路 = 该角色的**库内真条目**进注入区（此函数）
+        两路解耦：库里无该角色条目 → 返回空 → **不造记忆**（不猜）。
+        """
+        out: list[tuple[L3Item, int]] = []
+        for it in self._items:
+            if it.status != "active":
+                continue
+            if role in (getattr(it, "characters", ()) or ()):
+                out.append((it, 1))
+        out.sort(key=lambda p: -p[0].extraction_at(now))
         return out[:k]
 
     def active_items(self) -> list[L3Item]:

@@ -73,6 +73,9 @@ def expand_scene_words(entities: list[str]) -> list[str]:
 
     检索侧本地分解器的核心函数之一：写入侧与检索侧共用它，
     保证「咖啡」与「柠檬茶」都能扩出「饮品」，从而互相命中。
+
+    角色名（专有名词）不在 HYPERNYM_MAP/SITUATION_MAP 中，会被原样保留 ——
+    它们是倒排索引的合法居民（首府 P0-3 裁定）。
     """
     out: list[str] = []
     seen: set[str] = set()
@@ -83,7 +86,7 @@ def expand_scene_words(entities: list[str]) -> list[str]:
             out.append(w)
 
     for e in entities:
-        _push(e)                                  # ①实体本身
+        _push(e)                                  # ①实体本身（含角色名）
         if e in HYPERNYM_MAP:
             _push(HYPERNYM_MAP[e])                # ②上位词
         if e in SITUATION_MAP:

@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from kb.memory.service import UserMemory, open_user_memory
+from kb.memory.roles import decompose_roles
 
 # ---- 关系层级 -> 语气/距离的克制描述(不把裸数字给推理层) ------------------
 # 键为 tier 的机器名(见 kb.relation.affinity TierResult)。值是一句『关系定位』,
@@ -209,8 +210,8 @@ class SessionEngine:
             lines = "\n".join(f"· {p.content}" for p in proms[-4:])
             blocks.append("【你还未兑现/仍记着的约定】:\n" + lines)
 
-        # 4) 情绪察知(通道乙:独立于场景词。已知事实口吻,非指令 ——
-        #    首府 2026-10-07 三刀。数据层全留,注入层 top-3 限流,措辞跟强度走)
+        # 4) 情绪察知(通道乙:独立于场景词。已知事实口吻，非指令 ——
+        #    首府 2026-10-07 三刀。数据层全留，注入层 top-3 限流，措辞跟强度走)
         if self._last_user_msg:
             senses = self.memory.emotion_hits(self._last_user_msg, top_n=3)
             if senses:
@@ -218,7 +219,27 @@ class SessionEngine:
                 body = render_sense(senses)
                 if body:
                     blocks.append(
-                        "【此刻的察知】(你知道就好了,怎么接是你的分寸):\n" + body)
+                        "【此刻的察知】(你知道就好了，怎么接是你的分寸):\n" + body)
+
+        # 4.5) 角色回忆证据路（首府 2026-10-07 工单 P0-3）
+        #   氛围路 = 前端背景渐变（不依赖库）；证据路 = 这里，只给**库内真条目**。
+        #   纪律：零命中不造记忆（不猜）。角色名经检索通道进注入区，
+        #   预算顺位沿用 察知 > 记忆 > 关系。
+        if self._last_user_msg:
+            roles = decompose_roles(self._last_user_msg)
+            if roles:
+                role_lines: list[str] = []
+                for role in roles[:2]:          # 一轮最多两个角色的证据
+                    items = self.memory.role_memory(role, k=3)
+                    for it, _cnt in items:
+                        c = (getattr(it, "content", "") or "").strip()
+                        if c:
+                            role_lines.append(f"（关于{role}）{c}")
+                if role_lines:
+                    blocks.append(
+                        "【你想起的旧事】(不是听说，是你自己经历过的 —— "
+                        "说到相关人时自然会想起来):\n"
+                        + "\n".join("- " + l for l in role_lines[:4]))
 
         # 5) 关系距离(读取时由好感度折算的克制描述 —— 决定你对她多亲近)
         sig = self._sig()

@@ -27,6 +27,8 @@ def main():
     results['distill_timetravel'] = _run_py('-m', 'session.distill_timetravel_check')
     results['decay_purefunc'] = _run_py('-m', 'session.decay_probe')
     results['emotion_channel'] = _run_py('session/emotion_selftest.py')
+    results['roles_channel'] = _run_py('session/roles_selftest.py')
+    results['world_model'] = _run_py('session/world_selftest.py')
     results['l3_boundary'] = _run_py('session/l3_selftest.py')
 
     ok = all(results.values())
