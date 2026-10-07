@@ -20,6 +20,69 @@ API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 
 
+# ---------------------------------------------------------------------------
+# 用量账本(首府 2026-10-07 裁定 (a):账目要能自动出数)
+# ---------------------------------------------------------------------------
+# 纪律:**只加不改**。读 usage 是**追加事件**,不改任何状态/参数/prompt。
+# 字段(首府指定四个 + 单轮耗时):
+#   prompt_tokens / completion_tokens / prompt_cache_hit_tokens /
+#   prompt_cache_miss_tokens / seconds / kind / model
+# 缓存命中价差近十倍 → 15 轮里 prompt 越滚越长,命中率直接决定单位成本曲线,
+# 是后续 300 人成本模型的实测地基。写账**绝不影响**主调用返回值/异常路径。
+_USAGE_LOG: list = []
+
+
+def _record_usage(body: dict, *, kind: str, model: str,
+                  seconds: float = 0.0) -> dict:
+    """从返回体读 usage 并追加记账。失败静默(记账不是主链路)。"""
+    try:
+        u = (body or {}).get("usage") or {}
+        rec = {
+            "kind": kind,
+            "model": model,
+            "prompt_tokens": int(u.get("prompt_tokens", 0) or 0),
+            "completion_tokens": int(u.get("completion_tokens", 0) or 0),
+            "prompt_cache_hit_tokens": int(u.get("prompt_cache_hit_tokens", 0) or 0),
+            "prompt_cache_miss_tokens": int(u.get("prompt_cache_miss_tokens", 0) or 0),
+            "seconds": round(float(seconds), 3),
+        }
+        _USAGE_LOG.append(rec)
+        _path = os.getenv("DEEPSEEK_USAGE_JSONL", "")
+        if _path:
+            with open(_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        return rec
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def usage_snapshot() -> dict:
+    """进程内用量汇总(供账目脚本读)。不改状态,纯查询。"""
+    agg = {"calls": len(_USAGE_LOG), "prompt_tokens": 0, "completion_tokens": 0,
+           "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 0,
+           "seconds": 0.0, "by_kind": {}}
+    for r in _USAGE_LOG:
+        for k in ("prompt_tokens", "completion_tokens",
+                  "prompt_cache_hit_tokens", "prompt_cache_miss_tokens"):
+            agg[k] += r.get(k, 0)
+        agg["seconds"] = round(agg["seconds"] + r.get("seconds", 0.0), 3)
+        bk = agg["by_kind"].setdefault(r.get("kind", "?"),
+                                       {"calls": 0, "prompt_tokens": 0,
+                                        "completion_tokens": 0,
+                                        "prompt_cache_hit_tokens": 0,
+                                        "prompt_cache_miss_tokens": 0})
+        bk["calls"] += 1
+        for k in ("prompt_tokens", "completion_tokens",
+                  "prompt_cache_hit_tokens", "prompt_cache_miss_tokens"):
+            bk[k] += r.get(k, 0)
+    return agg
+
+
+def usage_reset() -> None:
+    """清空进程内账(测试用;不碰任何持久状态)。"""
+    _USAGE_LOG.clear()
+
+
 class DeepSeekError(Exception):
     """DeepSeek 调用失败。"""
 
@@ -31,7 +94,13 @@ def chat(
     temperature: float = 0.7,
     max_retries: int = 1,
 ) -> str:
-    """调用 DeepSeek,返回回复文本。失败重试一次(对应 Judge JSON 崩坏重跑策略)。"""
+    """调用 DeepSeek,返回回复文本。失败重试一次(对应 Judge JSON 崩坏重跑策略)。
+
+    施工纪律(首府 2026-10-07 裁定 (a),只加不改):
+      本函数对返回体**只做一件事** —— 追加读 usage 写账(见 _record_usage)。
+      prompt 拼装、参数、错误处理路径**一行不改**,行为对调用方完全不变,
+      仍返回 str。这是**追加事件**,不是改状态。
+    """
     if not API_KEY:
         raise DeepSeekError("未找到 DEEPSEEK_API_KEY(请检查 roleplay-eval/.env)")
 
@@ -57,8 +126,11 @@ def chat(
     last_err = None
     for attempt in range(max_retries + 1):
         try:
+            _t0 = time.time()
             with urllib.request.urlopen(req, timeout=120) as resp:
                 body = json.loads(resp.read().decode("utf-8"))
+                _record_usage(body, kind="chat", model=model,
+                              seconds=time.time() - _t0)
                 return body["choices"][0]["message"]["content"].strip()
         except Exception as e:  # noqa: BLE001
             last_err = e
@@ -138,6 +210,9 @@ def stream_chat(system: str, user: str, *,
         ],
         "temperature": temperature,
         "stream": True,
+        # 追加:让末帧带上 usage(不设则流式不返回用量)。
+        # 只影响服务端多回一个数据帧,不影响 yield 的正文内容/顺序/异常路径。
+        "stream_options": {"include_usage": True},
     }
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
@@ -151,6 +226,8 @@ def stream_chat(system: str, user: str, *,
 
     # 流式不自动重试:连建/认证错抛一次让调用方回退;中途断流不重试(半条已 yield,
     # 重试错接更糟)。调用方(engine._main_reply)本就 catch 后回退同步 chat() 兜底。
+    _t0 = time.time()
+    _usage_holder: dict = {}
     try:
         with urllib.request.urlopen(req, timeout=180) as resp:
             buf = b""
@@ -163,11 +240,17 @@ def stream_chat(system: str, user: str, *,
                         continue  # 空行/注释/事件行 -> 跳过
                     tok = s[len("data:"):].strip()
                     if tok == "[DONE]":
+                        _record_usage(_usage_holder, kind="stream", model=model,
+                                      seconds=time.time() - _t0)
                         return
                     try:
                         obj = json.loads(tok)
                     except ValueError:
                         continue
+                    # 末帧(include_usage)带 usage,正文为空 —— 只记账,不 yield
+                    if obj.get("usage"):
+                        _usage_holder.clear()
+                        _usage_holder.update(obj)
                     try:
                         delta = (obj["choices"][0]["delta"].get("content") or "")
                     except (KeyError, IndexError, TypeError):
@@ -175,4 +258,7 @@ def stream_chat(system: str, user: str, *,
                     if delta:
                         yield delta
     except Exception as e:  # noqa: BLE001
+        # 中途断流也把已收用量记账(若末帧已到)
+        _record_usage(_usage_holder, kind="stream-partial", model=model,
+                      seconds=time.time() - _t0)
         raise DeepSeekError(f"DeepSeek 流式中断: {e}")

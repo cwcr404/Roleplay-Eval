@@ -50,3 +50,5 @@ obs*.log
 session/obs*.log
 # 内部备忘(分支管理/临时事项)
 dev/NOTES.md
+# 用量账本落盘产物(随跑随变;结构见 utils/api._record_usage)
+dev/_usage_ledger.jsonl
