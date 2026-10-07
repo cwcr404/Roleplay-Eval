@@ -307,6 +307,24 @@ allow_r, why_r = EntryQuota.active_entry_allowed(s11, it11.last_evoked + 3600)
 check("降级不耗配额（无主动进口记录）", allow_r, why_r)
 check("72h 后离开不应期", not it11.in_refractory(it11.last_evoked + 74 * 3600))
 
+# ── 14. 词边界：坑1 补丁（首府 2026-10-07 裁定用例）──
+print("\n[14] 词边界：高危单字子串误判")
+from kb.memory.l3_store import decompose_query as _dq
+_b1 = _dq("外面下雨了")
+check("裁定A：外面下雨了 → 命中雨/天气", "雨" in _b1 and "天气" in _b1, str(_b1))
+check("裁定A：外面下雨了 → 不得命中食物/面",
+      "食物" not in _b1 and "面" not in _b1, str(_b1))
+_b2 = _dq("今天吃了面")
+check("裁定B：今天吃了面 → 命中面/食物", "面" in _b2 and "食物" in _b2, str(_b2))
+check("大晴天 → 上位桥天气", "天气" in _dq("今天又是一个大晴天"),
+      str(_dq("今天又是一个大晴天")))
+check("我在外面 → 零命中（不得触发面条）", _dq("我在外面") == [],
+      str(_dq("我在外面")))
+check("多字 key 嵌入：约定", "约定" in _dq("看海那天的约定我还记着"),
+      str(_dq("看海那天的约定我还记着")))
+check("安全单字允许嵌入：下雨", "雨" in _dq("外面在下雨"),
+      str(_dq("外面在下雨")))
+
 print("\n" + "=" * 62)
 print(f"结果：{PASS} 通过 / {FAIL} 失败")
 print("=" * 62)

@@ -258,21 +258,87 @@ class SceneIndex:
 
 
 # ── 检索侧本地分解器（与写入侧共用词表 —— 首府关键约束）──────
+def _is_cjk(ch: str) -> bool:
+    """是否汉字（含扩展区）。非汉字（标点/空格/英文/数字）视为天然边界。"""
+    o = ord(ch)
+    return (0x4E00 <= o <= 0x9FFF or 0x3400 <= o <= 0x4DBF
+            or 0xF900 <= o <= 0xFAFF or 0x20000 <= o <= 0x2FA1F)
+
+
+# 高危单字（需过误报黑名单）：单字且易嵌入无关词造成子串误判。
+STRICT_SINGLE_KEYS: frozenset[str] = frozenset({"面", "水"})
+
+# 高危单字的误报搭配（黑名单）—— 只有命中这些才丢弃。
+# 理由：白名单（列举“吃面/煮面”）穷举不完，黑名单（“外面/见面”）才是
+# 有限集且即错集。邻字判定的方向反了：不问“是否像真词”，只问“是否已知误报”。
+# 依据：首府 2026-10-07 坑1 裁定（不用词表，先堵最脏的一个）。
+FALSE_POSITIVE_PAIRS: dict[str, frozenset[str]] = {
+    "面": frozenset({
+        "外", "里", "见", "方", "上", "下", "前", "后", "片", "局",
+        "场", "地", "表", "画", "会", "书", "页", "市", "门", "世",
+        "着", "一", "全", "多", "正", "反", "侧", "剖", "截", "断",
+    }),
+    "水": frozenset({
+        "果", "平", "香", "药", "墨", "逆", "洪", "雨", "汗", "泪",
+        "口", "泉", "源", "流", "蓄", "废", "污", "防", "抽", "脱",
+    }),
+}
+
+
+def _boundary_ok(text: str, key: str, pos: int) -> bool:
+    """词边界判定（首府 2026-10-07 坑1 补丁）。
+
+    规则分两档：
+    - **高危单字**（STRICT_SINGLE_KEYS）：“面/水”，只在**命中误报黑名单**时丢弃：
+      「外面/见面/方面」的「面」丢；「吃面/煮了面/面条」的「面」留。
+      方向是黑名单而非白名单：误报集有限且已知，白名单穷举不完。
+    - **其余 key**（含“雨/雪/晴”及全部多字词）：允许嵌入
+      （“下雨”“晴天”“大晴天”都是真命中）。
+    只修匹配边界，不碰词表内容；误报黑名单可随实测滚动扩充。
+    """
+    if key not in STRICT_SINGLE_KEYS:
+        return True
+    bad = FALSE_POSITIVE_PAIRS.get(key, frozenset())
+    end = pos + len(key)
+    prev = text[pos - 1] if pos > 0 else ""
+    nxt = text[end] if end < len(text) else ""
+    if prev in bad or nxt in bad:
+        return False
+    return True
+
+
 def decompose_query(text: str) -> list[str]:
     """把一条用户消息本地分解为场景词（三层扩展）。
 
     零 LLM、毫秒级、每轮必跑（无论情绪强度）。
     与写入侧共用 l3_vocab 的 expand_scene_words，保证写读对称。
+    词边界：所有 key 按整词匹配（防子串误判，见 _boundary_ok）。
     """
     from .l3_vocab import HYPERNYM_MAP, SITUATION_MAP
 
     found: list[str] = []
-    for key in HYPERNYM_MAP:
-        if key in text:
-            found.append(key)
-    for key in SITUATION_MAP:
-        if key in text:
-            found.append(key)
+
+    def _scan(keys) -> None:
+        for key in keys:
+            if not key:
+                continue
+            # 多字 key 优先（长词优先，避免短词吃掉长词边界）
+            start = 0
+            hit = False
+            while True:
+                i = text.find(key, start)
+                if i < 0:
+                    break
+                if _boundary_ok(text, key, i):
+                    hit = True
+                    break
+                start = i + 1
+            if hit:
+                found.append(key)
+
+    ordered = sorted(HYPERNYM_MAP.keys(), key=len, reverse=True)
+    _scan(ordered)
+    _scan(sorted(SITUATION_MAP.keys(), key=len, reverse=True))
     return expand_scene_words(found)
 
 
