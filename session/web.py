@@ -153,7 +153,16 @@ function renderVig(name){
  vig.style.opacity=1;
 }
 /* 回忆路:换图 —— 只对「库内真有条目」的角色换(零命中不切图,不裸图 cos) */
+var _shotTimer=null;
+var SHOT_HOLD_MS=15000;   /* 15s 后自动切回主图(视频) */
+function backToBase(){
+ if(_shotTimer){clearTimeout(_shotTimer);_shotTimer=null;}
+ shot.style.opacity=0;
+ vid.style.opacity=.55;
+ renderVig(null);
+}
 function renderShot(name,hasEvidence){
+ if(_shotTimer){clearTimeout(_shotTimer);_shotTimer=null;}
  if(name&&hasEvidence&&SLUG[name]){
   var url='/assets/characters/'+SLUG[name]+'/'+SLUG[name]+'_01.jpg';
   var im=new Image();
@@ -161,6 +170,8 @@ function renderShot(name,hasEvidence){
     vid.style.opacity=0;};
   im.onerror=function(){shot.style.opacity=0;vid.style.opacity=.55;};
   im.src=url;
+  /* 15s 后回到主图(视频) —— 回忆是会淡去的 */
+  _shotTimer=setTimeout(backToBase,SHOT_HOLD_MS);
  }else{
   shot.style.opacity=0;vid.style.opacity=.55;
  }
