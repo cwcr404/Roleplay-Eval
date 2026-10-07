@@ -13,14 +13,19 @@
 页面:GET / 返回单页,底部输入框,一次一答(纯 fetch,无轮询)。
 
 回忆可视化(P0-3 第二批,呈现层):
-- **氛围路**:提到角色 → 背景渐变按其主题色漂移(纯视觉,不依赖库)。
-- **证据路**:库内真条目以卡片浮现(零命中则不浮 —— 不裸图 cos)。
+- **底色路**:全屏背景视频（网易多多壁纸，`assets/bg/mei_wall.mp4`）
+  + 角色主题色**边缘光晕**（vignette）叠加 —— 默认态。
+- **回忆路**:提到角色 → 背景视频**淡出**，换成该角色的图
+  （`assets/characters/<slug>/<slug>_01.jpg`）+ 库内真条目卡片浮现；
+  没提到 → 回视频。
 - 两路的**数据源都在引擎侧只读派生**(见 SessionEngine._recall_view),
   web 只是消费者 —— 不直读存储模块。
+- **零命中不切图**：库里没这人的条目时（只认得），背景不换 —— 不裸图 cos。
 """
 from __future__ import annotations
 
 import json
+import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -35,11 +40,20 @@ _INDEX_HTML = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
  body{font-family:-apple-system,'Segoe UI','Microsoft YaHei',system-ui,sans-serif;
       margin:0;background:#0f1424;color:#eae9f2;height:100vh;display:flex;flex-direction:column;
       position:relative;transition:background 1.2s ease}
- /* 氛围路:背景渐变层(角色主题色漂移)。默认暗色,提到角色时叠加。 */
- #aura{position:fixed;inset:0;z-index:0;pointer-events:none;opacity:0;
-       transition:opacity 1.4s ease,background 1.4s ease}
- header,footer{position:relative;z-index:2}
- .wrap{position:relative;z-index:2}
+/* 底色路:背景视频 + 主题色边缘光晕(vignette) */
+#bgvid{position:fixed;inset:0;z-index:0;width:100%;height:100%;object-fit:cover;
+       opacity:.55;transition:opacity 1.2s ease}
+/* 回忆路:角色图铺底层,默认透明 */
+#bgshot{position:fixed;inset:0;z-index:1;background-size:cover;
+        background-position:center;opacity:0;transition:opacity 1.2s ease}
+/* 主题色光晕:四边向内渐隐,不遮中间聊天区 */
+#vig{position:fixed;inset:0;z-index:2;pointer-events:none;opacity:0;
+     transition:opacity 1.4s ease,background 1.4s ease}
+/* 压暗叠层:保证文字可读 */
+#scrim{position:fixed;inset:0;z-index:3;pointer-events:none;
+       background:linear-gradient(180deg,rgba(8,10,22,.72) 0%,rgba(8,10,22,.45) 40%,rgba(8,10,22,.78) 100%)}
+ header,footer{position:relative;z-index:5}
+ .wrap{position:relative;z-index:5}
  header{padding:12px 18px;background:#1a2140;border-bottom:1px solid #2c3560;
         display:flex;align-items:baseline;gap:12px}
  header h1{font-size:16px;margin:0;color:#c8b6ff}
@@ -76,7 +90,13 @@ _INDEX_HTML = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
       background:#57d39b;vertical-align:middle}
 </style></head>
 <body>
-<div id="aura"></div>
+<div id="bgvid-wrap"></div>
+<video id="bgvid" autoplay muted loop playsinline preload="auto">
+  <source src="/assets/bg/mei_wall.mp4" type="video/mp4">
+</video>
+<div id="bgshot"></div>
+<div id="vig"></div>
+<div id="scrim"></div>
 <header>
   <h1>雷电芽衣</h1>
   <div id="rel">连接中…</div>
@@ -89,7 +109,8 @@ _INDEX_HTML = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
 <script>
 var log=document.getElementById('log'),inp=document.getElementById('inp'),
     send=document.getElementById('send'),rel=document.getElementById('rel'),
-    aura=document.getElementById('aura');
+    vig=document.getElementById('vig'),vid=document.getElementById('bgvid'),
+    shot=document.getElementById('bgshot');
 function el(kind,cls,txt){var e=document.createElement(kind);if(cls)e.className=cls;
  if(txt!=null)e.textContent=txt;return e;}
 function bubble(msg,who){
@@ -104,33 +125,54 @@ function setBusy(b){send.disabled=b;send.classList.toggle('busy',b);
 function renderRel(s){if(!s)return;rel.textContent=(s.tier||'')+'  ·  亲和 '+s.affinity;
  }
 
-/* ---- 氛围路:角色主题色(硬编码本地,不依赖库/网络) ---- */
+/* ---- 底色路:角色主题色表(本地硬编码,零网络/库依赖) ---- */
 var AURA={
  '琪亚娜':['#8fc7ff','#ffd9ec'],'布洛妮娅':['#8f9dff','#b9c8d8'],
  '姬子':['#ff9a6b','#ffd0a8'],'德丽莎':['#c9a8ff','#ffe3f0'],
  '符华':['#9fd8c8','#cfeee4'],'希儿':['#7fb8e8','#c9d6ff'],
  '渡鸦':['#6f7fb8','#a8b4d8'],'爱莉希雅':['#ffa8e0','#ffd6f0']
 };
-var AURA_DEFAULT='#0f1424';
-function renderAura(roles){
- if(!roles||!roles.length){aura.style.opacity=0;return;}
- var deep=null;
- for(var i=0;i<roles.length;i++){if(AURA[roles[i].name]){deep=roles[i].name;break;}}
- if(!deep){aura.style.opacity=0;return;}
- var c=AURA[deep];
- aura.style.background='radial-gradient(circle at 30% 12%,'+c[1]+'22 0%,'
-   +c[0]+'33 35%,transparent 72%),'
-   +'linear-gradient(160deg,'+c[0]+'18,transparent 60%)';
- aura.style.opacity=1;
- body0.style.background=c[0]+'12';
+/* 角色名 → 图池目录 slug(= 认知层 24 人的英文名;图池就位后逐步补齐) */
+var SLUG={
+ '琪亚娜':'kiana','布洛妮娅':'bronya','姬子':'himeko','德丽莎':'theresa',
+ '符华':'fuhua','希儿':'seele','渡鸦':'raven','爱莉希雅':'elysia',
+ '凯文':'kevin'
+};
+function pickRole(roles){
+ if(!roles||!roles.length)return null;
+ for(var i=0;i<roles.length;i++){if(AURA[roles[i].name])return roles[i].name;}
+ return null;
 }
-var body0=document.body;
+/* 边缘光晕:四边向内渐隐,中心留空不遮聊天区 */
+function renderVig(name){
+ if(!name){vig.style.opacity=0;return;}
+ var c=AURA[name];
+ vig.style.background=
+  'radial-gradient(ellipse at 50% 50%,transparent 42%,'+c[0]+'40 78%,'+c[0]+'70 100%),'
+  +'linear-gradient(180deg,'+c[0]+'55,'+c[1]+'2a 45%,'+c[0]+'66)';
+ vig.style.opacity=1;
+}
+/* 回忆路:换图 —— 只对「库内真有条目」的角色换(零命中不切图,不裸图 cos) */
+function renderShot(name,hasEvidence){
+ if(name&&hasEvidence&&SLUG[name]){
+  var url='/assets/characters/'+SLUG[name]+'/'+SLUG[name]+'_01.jpg';
+  var im=new Image();
+  im.onload=function(){shot.style.backgroundImage='url('+url+')';shot.style.opacity=1;
+    vid.style.opacity=0;};
+  im.onerror=function(){shot.style.opacity=0;vid.style.opacity=.55;};
+  im.src=url;
+ }else{
+  shot.style.opacity=0;vid.style.opacity=.55;
+ }
+}
 
 /* ---- 证据路:库内真条目卡片 ---- */
 function renderRecall(anchor,d){
  var roles=(d&&d.recall&&d.recall.roles)||[];
  var items=(d&&d.recall&&d.recall.items)||[];
- renderAura(roles);
+ var name=pickRole(roles);
+ renderVig(name);
+ renderShot(name, items.length>0);
  var box=el('div','recall');
  roles.forEach(function(r){
   if(r.depth==='none')return;
@@ -228,10 +270,39 @@ class _Handler(BaseHTTPRequestHandler):
             body = _INDEX_HTML.encode("utf-8")
             self._write(200, body, "text/html; charset=utf-8")
             return
+        if path.startswith("/assets/"):
+            self._serve_asset(path)
+            return
         if path == "/state":
             self._send(200, self.engine.state())
             return
         self._send(404, {"error": "not found"})
+
+    # 静态资源（背景视频 / 角色图）—— 只读，白名单根目录，禁止穿目录
+    _ASSET_ROOT = os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "assets")
+    _ASSET_TYPE = {
+        ".mp4": "video/mp4", ".webm": "video/webm",
+        ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+        ".png": "image/png", ".webp": "image/webp",
+    }
+
+    def _serve_asset(self, path: str):
+        rel = path[len("/assets/"):]
+        # 归一 + 断言仍在 assets/ 下（防 ../ 穿越）
+        target = os.path.normpath(os.path.join(self._ASSET_ROOT, rel))
+        root = os.path.normpath(self._ASSET_ROOT)
+        if not target.startswith(root + os.sep):
+            self._send(403, {"error": "forbidden"})
+            return
+        ext = os.path.splitext(target)[1].lower()
+        ctype = self._ASSET_TYPE.get(ext)
+        if ctype is None or not os.path.isfile(target):
+            self._send(404, {"error": "not found"})
+            return
+        with open(target, "rb") as fh:
+            body = fh.read()
+        self._write(200, body, ctype)
 
     def do_POST(self):  # noqa: N802
         path = urlparse(self.path).path
