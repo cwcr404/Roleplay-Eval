@@ -112,6 +112,7 @@ class SessionEngine:
         self._kb = kb  # 知识库检索器 {guide,lore};None=惰性 build_kb(离线/不配则不查)
         self._kb_log: list[str] = []  # 每轮 KB 闸门观测日志(攻略无素材入栈,冒烟观测)
         self._last_modality: Optional[str] = None  # 上轮路由结果("闲聊"/"攻略";观测/验收读)
+        self._last_user_msg: str = ""  # 本轮玩家原话(情绪通道读;每轮 turn 开头刷新)
         # ---- 产品线 Agent3 异步质检状态(会话级;quality_prompt=None 时整块不动) ----
         self.quality_prompt: Optional[str] = quality_prompt
         self.quality_judge: Optional[Callable] = quality_judge
@@ -208,7 +209,18 @@ class SessionEngine:
             lines = "\n".join(f"· {p.content}" for p in proms[-4:])
             blocks.append("【你还未兑现/仍记着的约定】:\n" + lines)
 
-        # 3) 关系距离(读取时由好感度折算的克制描述 —— 决定你对她多亲近)
+        # 4) 情绪察知(通道乙:独立于场景词。已知事实口吻,非指令 ——
+        #    首府 2026-10-07 三刀。数据层全留,注入层 top-3 限流,措辞跟强度走)
+        if self._last_user_msg:
+            senses = self.memory.emotion_hits(self._last_user_msg, top_n=3)
+            if senses:
+                from kb.memory.bundle import render_sense
+                body = render_sense(senses)
+                if body:
+                    blocks.append(
+                        "【此刻的察知】(你知道就好了,怎么接是你的分寸):\n" + body)
+
+        # 5) 关系距离(读取时由好感度折算的克制描述 —— 决定你对她多亲近)
         sig = self._sig()
         tk = sig.get("tier", "")
         blocks.append("【你们如今的关系】:" + AYAME_DISTANCE_TEXTS.get(tk, AYAME_DISTANCE_TEXTS["同行"]))
@@ -258,6 +270,8 @@ class SessionEngine:
         force_no_event: True 时不跑抽取(评测隔离等场景),默认 False。
         """
         user_msg = (user_msg or "").strip()
+        # 先把本轮玩家原话记给 _memory_context（情绪通道要用当前这句，不是上一轮）
+        self._last_user_msg = user_msg
         system = self._system_for_turn()
 
         # --- 1. 主回复:Agent2(人格)在『记忆+关系』上下文下生成芽衣的话 ----

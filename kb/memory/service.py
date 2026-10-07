@@ -144,14 +144,36 @@ class UserMemory:
             hits.append(Hit(item=it, medium=f"命中{cnt}词", faded=faded))
         return hits
 
-    def injection(self, query: str = "", *, k: int = 3, now=None) -> str:
-        """注入出口(与 l2() 同出口):关系块 + 记忆块。
+    # ---- 情绪通道(通道乙:独立于场景词,零 LLM) ----
+    def emotion_hits(self, query: str, *, top_n: int = 3,
+                     now=None) -> list:
+        """找(第二路):本地词法分解当前言里的情绪 → list[SenseHit]。
+
+        刀一:走通道乙 —— 与场景词通道零共享(不 import l3_vocab)。
+        刀二:数据层全留、注入层 top-N 限流。
+        刀三:措辞跟强度走(单一事实源 emotion.STRENGTH_PHRASES)。
+        零 LLM,毫秒级,每轮必跑。
+        """
+        from .emotion import decompose_emotion, select_top
+        from .bundle import SenseHit
+        if not query:
+            return []
+        raw = decompose_emotion(query)
+        picked = select_top(raw, top_n)
+        return [SenseHit(family=r["family"], strength=r["strength"],
+                         phrase=r.get("phrase", ""), hit=r.get("hit", ""))
+                for r in picked]
+
+    def injection(self, query: str = "", *, k: int = 3, now=None,
+                  emotion_top_n: int = 3) -> str:
+        """注入出口(与 l2() 同出口):关系块 + 情绪察知块 + 记忆块。
 
         返回可注入文本;结构化状态(degraded/status)不进文本。
         """
         from .bundle import build_bundle
         hits = self.l3_hits(query, k=k, now=now) if query else []
-        return build_bundle(self.l2(), hits).text
+        senses = self.emotion_hits(query, top_n=emotion_top_n, now=now) if query else []
+        return build_bundle(self.l2(), hits, senses=senses).text
 
 
     def rebuild_l2(self, distill_fn: Optional[Callable[[str], str]] = None) -> L2Profile:
