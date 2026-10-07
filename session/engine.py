@@ -68,6 +68,10 @@ class TurnResult:
     event_recorded: bool = False            # 书记员是否真的写了一行 L1
     event_type: Optional[str] = None
     injected_memory: str = ""               # 本轮回调注入的记忆/关系上下文(调试用)
+    # 回忆可视化(呈现层,P0-3 第二批)—— 只读派生,不改任何状态。
+    # 氛围路:命中的角色 → 主题色/词条（前端背景渐变取色）;证据路:库内真条目。
+    recall_roles: list = field(default_factory=list)
+    recall_items: list = field(default_factory=list)
 
 
 class SessionEngine:
@@ -323,6 +327,7 @@ class SessionEngine:
         self._maybe_distill()
 
         sig = self._sig()
+        recall_roles, recall_items = self._recall_view(user_msg)
         return TurnResult(
             user_msg=user_msg,
             reply=reply or "(回复失败)",
@@ -332,7 +337,56 @@ class SessionEngine:
             event_recorded=ev is not None,
             event_type=ev.type if ev else None,
             injected_memory=self._memory_context(),
+            recall_roles=recall_roles,
+            recall_items=recall_items,
         )
+
+    def _recall_view(self, user_msg: str):
+        """回忆可视化的**只读派生**（P0-3 第二批呈现层）。
+
+        纪律：
+        - **只加不改**：纯读，不写库、不改游标、不动状态。
+        - **零命中不造**：库里没有角色条目就返回空列表（不猜、不裸图 cos）。
+        - 双路解耦：氛围路（角色→主题色，供背景渐变）与证据路（库内真条目）
+          各自独立；氛围路只需要「提到谁」，证据路只给「库里真有什么」。
+        - 这里算的与 `_memory_context` 4.5 路取的是同一来源，但**不共用**
+          （注入层有预算截断，呈现层要全量给前端看）。
+        """
+        if not user_msg:
+            return [], []
+        roles = decompose_roles(user_msg)
+        if not roles:
+            return [], []
+        try:
+            from kb.world import mei_world as W
+        except Exception:  # noqa: BLE001
+            W = None
+        out_roles: list = []
+        out_items: list = []
+        for role in roles[:2]:
+            rel = W.relation_of(role) if W else None
+            aq = W.acquaintance_of(role) if W else None
+            scenes = W.scenes_with(role) if W else []
+            out_roles.append({
+                "name": role,
+                "depth": "deep" if rel else ("shallow" if aq else "none"),
+                "relation": (rel or {}).get("relation", ""),
+                "line": (aq or {}).get("line", "") if isinstance(aq, dict) else "",
+                "scenes": list(scenes),
+            })
+            try:
+                items = self.memory.role_memory(role, k=5)
+            except Exception:  # noqa: BLE001
+                items = []
+            for it, cnt in items:
+                out_items.append({
+                    "role": role,
+                    "content": (getattr(it, "content", "") or "").strip(),
+                    "tags": getattr(it, "tags", "") or "",
+                    "scene_words": list(getattr(it, "scene_words", []) or []),
+                    "hits": int(cnt),
+                })
+        return out_roles, out_items
 
     def _render_history(self) -> str:
         """转写历史(最近 history_turns 轮)渲染成给 Agent2 的上下文。"""

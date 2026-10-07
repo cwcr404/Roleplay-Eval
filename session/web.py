@@ -6,10 +6,17 @@
 『引擎露出』做对 —— web 只是 SessionEngine 的一个薄消费者,不掺业务。
 
 约定(保持人格/关系边界):
-- POST /turn {user, msg} -> {reply, affinity, tier, ritual_blocked, ev}
+- POST /turn {user, msg} -> {reply, affinity, tier, ritual_blocked, ev,
+                            recall:{roles:[...], items:[...]}}
 - GET  /state            -> {user, turns, affinity, tier, ritual_blocked}
 - POST /reset            -> 清空引擎历史(账本不清 —— 账本是宪法级,web 无权抹)
 页面:GET / 返回单页,底部输入框,一次一答(纯 fetch,无轮询)。
+
+回忆可视化(P0-3 第二批,呈现层):
+- **氛围路**:提到角色 → 背景渐变按其主题色漂移(纯视觉,不依赖库)。
+- **证据路**:库内真条目以卡片浮现(零命中则不浮 —— 不裸图 cos)。
+- 两路的**数据源都在引擎侧只读派生**(见 SessionEngine._recall_view),
+  web 只是消费者 —— 不直读存储模块。
 """
 from __future__ import annotations
 
@@ -26,7 +33,13 @@ _INDEX_HTML = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
 <style>
  *{box-sizing:border-box}
  body{font-family:-apple-system,'Segoe UI','Microsoft YaHei',system-ui,sans-serif;
-      margin:0;background:#0f1424;color:#eae9f2;height:100vh;display:flex;flex-direction:column}
+      margin:0;background:#0f1424;color:#eae9f2;height:100vh;display:flex;flex-direction:column;
+      position:relative;transition:background 1.2s ease}
+ /* 氛围路:背景渐变层(角色主题色漂移)。默认暗色,提到角色时叠加。 */
+ #aura{position:fixed;inset:0;z-index:0;pointer-events:none;opacity:0;
+       transition:opacity 1.4s ease,background 1.4s ease}
+ header,footer{position:relative;z-index:2}
+ .wrap{position:relative;z-index:2}
  header{padding:12px 18px;background:#1a2140;border-bottom:1px solid #2c3560;
         display:flex;align-items:baseline;gap:12px}
  header h1{font-size:16px;margin:0;color:#c8b6ff}
@@ -42,6 +55,15 @@ _INDEX_HTML = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
  .meta{font-size:11px;color:#7b83b0;margin-top:3px}
  .row.u .meta{text-align:right}
  .err{color:#ff7a7a;font-size:12px;padding:2px 6px}
+ /* 证据路:回忆卡片 */
+ .recall{margin-top:8px;display:flex;flex-direction:column;gap:6px}
+ .rcard{background:rgba(107,95,199,.14);border-left:3px solid #6b5fc7;
+        border-radius:8px;padding:7px 11px;font-size:12px;line-height:1.5;
+        animation:rise .5s ease}
+ .rcard .who{color:#c8b6ff;font-weight:600;margin-right:6px}
+ .rcard .tags{color:#8f97c8;font-size:11px;margin-top:3px}
+ @keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+ .rhint{font-size:11px;color:#6f78a8;padding:1px 4px}
  footer{padding:10px 14px;display:flex;gap:8px;background:#1a2140;
         border-top:1px solid #2c3560}
  #inp{flex:1;padding:11px 13px;border-radius:12px;border:1px solid #3a4666;
@@ -54,6 +76,7 @@ _INDEX_HTML = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
       background:#57d39b;vertical-align:middle}
 </style></head>
 <body>
+<div id="aura"></div>
 <header>
   <h1>雷电芽衣</h1>
   <div id="rel">连接中…</div>
@@ -65,7 +88,8 @@ _INDEX_HTML = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
 </footer>
 <script>
 var log=document.getElementById('log'),inp=document.getElementById('inp'),
-    send=document.getElementById('send'),rel=document.getElementById('rel');
+    send=document.getElementById('send'),rel=document.getElementById('rel'),
+    aura=document.getElementById('aura');
 function el(kind,cls,txt){var e=document.createElement(kind);if(cls)e.className=cls;
  if(txt!=null)e.textContent=txt;return e;}
 function bubble(msg,who){
@@ -79,6 +103,53 @@ function setBusy(b){send.disabled=b;send.classList.toggle('busy',b);
  send.textContent=b?'…':'发送';}
 function renderRel(s){if(!s)return;rel.textContent=(s.tier||'')+'  ·  亲和 '+s.affinity;
  }
+
+/* ---- 氛围路:角色主题色(硬编码本地,不依赖库/网络) ---- */
+var AURA={
+ '琪亚娜':['#8fc7ff','#ffd9ec'],'布洛妮娅':['#8f9dff','#b9c8d8'],
+ '姬子':['#ff9a6b','#ffd0a8'],'德丽莎':['#c9a8ff','#ffe3f0'],
+ '符华':['#9fd8c8','#cfeee4'],'希儿':['#7fb8e8','#c9d6ff'],
+ '渡鸦':['#6f7fb8','#a8b4d8'],'爱莉希雅':['#ffa8e0','#ffd6f0']
+};
+var AURA_DEFAULT='#0f1424';
+function renderAura(roles){
+ if(!roles||!roles.length){aura.style.opacity=0;return;}
+ var deep=null;
+ for(var i=0;i<roles.length;i++){if(AURA[roles[i].name]){deep=roles[i].name;break;}}
+ if(!deep){aura.style.opacity=0;return;}
+ var c=AURA[deep];
+ aura.style.background='radial-gradient(circle at 30% 12%,'+c[1]+'22 0%,'
+   +c[0]+'33 35%,transparent 72%),'
+   +'linear-gradient(160deg,'+c[0]+'18,transparent 60%)';
+ aura.style.opacity=1;
+ body0.style.background=c[0]+'12';
+}
+var body0=document.body;
+
+/* ---- 证据路:库内真条目卡片 ---- */
+function renderRecall(anchor,d){
+ var roles=(d&&d.recall&&d.recall.roles)||[];
+ var items=(d&&d.recall&&d.recall.items)||[];
+ renderAura(roles);
+ var box=el('div','recall');
+ roles.forEach(function(r){
+  if(r.depth==='none')return;
+  var hint=r.depth==='deep'?(r.relation||''):(r.line||'');
+  if(hint){var h=el('div','rhint',(r.depth==='deep'?'· 她认识 ':'· 她认得 ')
+    +r.name+' —— '+hint);box.appendChild(h);}
+ });
+ items.forEach(function(it){
+  var c=el('div','rcard');
+  var w=el('span','who','关于'+it.role+'：');
+  c.appendChild(w);c.appendChild(document.createTextNode(it.content));
+  if(it.tags){c.appendChild(el('div','tags','情绪 · '+it.tags));}
+  box.appendChild(c);
+ });
+ if(!box.children.length)return;
+ anchor.firstChild.appendChild(box);
+ log.scrollTop=log.scrollHeight;
+}
+
 function post(path,body,method){
  var m=method||'POST';var opt={method:m};
  if(body!=null){opt.headers={'Content-Type':'application/json'};
@@ -97,6 +168,7 @@ function doSend(){
    var mb=el('div','meta',(d.ritual_blocked?'仪式未过 · ':'')+
       '亲和 '+(d.affinity)+' · '+(d.tier||'')+(d.ev?('  · 记得: '+d.ev):''));
    pending.firstChild.appendChild(mb);
+   renderRecall(pending.firstChild,d);
    renderRel({tier:d.tier,affinity:d.affinity});
  }).catch(function(e){pending.remove();user.querySelector('.bub').textContent=
     msg;errmsg('发送失败: '+e.message);})
@@ -176,6 +248,10 @@ class _Handler(BaseHTTPRequestHandler):
                 "tier": r.tier_key,
                 "ritual_blocked": r.ritual_blocked,
                 "ev": (r.event_type if r.event_recorded else ""),
+                "recall": {
+                    "roles": getattr(r, "recall_roles", []) or [],
+                    "items": getattr(r, "recall_items", []) or [],
+                },
             })
             return
         if path == "/reset":
